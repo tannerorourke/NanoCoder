@@ -16,7 +16,7 @@ The dataset, model, and tokenizer are available on HuggingFace.
 
 - **Datasets:** NanoCoder-corpus-pretrain, NanoCoder-corpus-sft
 - **Tokenizer:** NanoCoderTokenizer
-- **Models:** NanoCoder-110M-pretrain, NanoCoder-110M-sft (coming soon)
+- **Models:** NanoCoder-123M-pretrain, NanoCoder-123M-sft (coming soon)
 
 Because NanoCoder is custom (not a `transformers` class), consumers reconstruct it with `NanoCoder.from_pretrained`, which rebuilds both the model and the tokenizer:
 
@@ -28,6 +28,37 @@ nano = NanoCoder.from_pretrained(snapshot_download("<you>/NanoCoder-110M"), devi
 print(nano.generate_text("## Task\nWrite a function that reverses a string.\n\n## Solution\n"))
 ```
 
-## Files
+## Usage
 
 This repository defines a reusable package (`src/nanocoder`) that is walked through in pieces in the `src/notebooks` modules.
+
+NanoCoder is built as a series of modeling artifacts, each pushed to HuggingFace and consumed by the next. Set a write token first:
+
+```bash
+export HF_TOKEN=hf_xxx  # or hf auth login
+```
+
+**1 — Build the pretrain dataset** → pushes `NanoCoder-pretrain`
+
+```bash
+python -m nanocoder.data.build_pretrain --repo-id <you>/NanoCoder-pretrain
+# smoke test first:  --max-samples 2000 --no-push
+```
+
+**2 — Train the tokenizer** → pushes `NanoCoder-tokenizer`
+
+```bash
+python -m nanocoder.tokenizer.build \
+    --pretrain-repo <you>/NanoCoder-pretrain \
+    --repo-id       <you>/NanoCoder-tokenizer
+```
+
+**3 — Train the base model** → pushes `NanoCoder-110M`
+
+```bash
+python -m nanocoder.model.train \
+    --tokenizer-repo <you>/NanoCoder-tokenizer \
+    --repo-id        <you>/NanoCoder-110M
+```
+
+Every entrypoint takes `--help`, `--no-push` (build/verify without uploading), and `--private`.
