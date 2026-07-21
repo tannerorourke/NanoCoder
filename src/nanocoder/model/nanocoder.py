@@ -1,25 +1,29 @@
 """NanoCoder: the portable model wrapper (weights + config + tokenizer).
 
 Bundles the GPT, its config, and the tokenizer into one object that round-trips to
-disk and to the Hub (via 'PushToHubMixin``). Verbatim from the notebook, with imports
-resolving the classes the notebook had as module globals.
+disk and to the Hub. save_pretrained writes weights, config, and tokenizer together,
+so any checkpoint loads standalone - no revision depends on another.
+
+Hub access goes through huggingface_hub directly. Dropping transformers' PushToHubMixin
+removed the package's last dependency on transformers, which a from-scratch model has
+no reason to carry.
 """
 import json
 import os
+import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 from contextlib import nullcontext
-from transformers.utils.hub import PushToHubMixin  # gives NanoCoder.push_to_hub
 
 from nanocoder.model.gpt import GPT
 from nanocoder.tokenizer.tokenizer import NanoCoderTokenizer
 from nanocoder.training.config import NanoCoderConfig
 
 
-class NanoCoder(torch.nn.Module, PushToHubMixin):
+class NanoCoder(torch.nn.Module):
     """ Portable wrapper interface for GPT model """
     def __init__(self, model, config, tokenizer, device: str | None = None):
         super().__init__()
@@ -30,8 +34,7 @@ class NanoCoder(torch.nn.Module, PushToHubMixin):
         self.device = device if device is not None else (
             'cuda' if torch.cuda.is_available() else 'cpu')
 
-    def save_pretrained(self, save_dir: Path | str, **kwargs):
-        # **kwargs: push_to_hub calls this with max_shard_size=..., which we ignore
+    def save_pretrained(self, save_dir: Path | str):
         os.makedirs(save_dir, exist_ok=True)
 
         torch.save(self.model.state_dict(),
@@ -61,6 +64,33 @@ class NanoCoder(torch.nn.Module, PushToHubMixin):
             tokenizer = NanoCoderTokenizer.from_pretrained(load_dir)
 
         return cls(model=model, config=config, tokenizer=tokenizer)
+
+    def push_to_hub(
+        self,
+        repo_id: str,
+        private: bool = False,
+        revision: str | None = None,
+        commit_message: str = "Push NanoCoder",
+        token: str | None = None,
+    ) -> str:
+        """
+        Save to a temp dir and upload the folder.
+
+        Replaces transformers' PushToHubMixin: that was the package's only dependency on
+        transformers, for a method that is a create_repo + upload_folder underneath.
+        'revision' targets a branch, which is how the post-trained stages are published
+        side by side on one repo.
+        """
+        from huggingface_hub import HfApi
+        api = HfApi(token=token)
+        api.create_repo(repo_id, repo_type="model", private=private, exist_ok=True)
+        if revision is not None:
+            api.create_branch(repo_id, branch=revision, repo_type="model", exist_ok=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            self.save_pretrained(tmp)
+            api.upload_folder(folder_path=tmp, repo_id=repo_id, repo_type="model",
+                              commit_message=commit_message, revision=revision)
+        return f"https://huggingface.co/{repo_id}"
 
     @torch.no_grad()
     def generate_text(
