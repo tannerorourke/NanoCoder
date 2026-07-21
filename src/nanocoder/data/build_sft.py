@@ -1,25 +1,23 @@
 """Entrypoint
 
-Build the NanoCoder-sft dataset: instruction pairs whose completion is code and nothing else.
+Build the NanoCoder-sft dataset and push it to HF (requires HF write token)
 
     python -m nanocoder.data.build_sft --repo-id <user>/NanoCoder-sft
 
-The same five instruction sources the pretrain mix used, re-streamed and filtered far
-harder. Pretraining wanted volume; this wants exemplars, and the two goals disagree.
+To build instruction pairs whose completion is code and nothing else, the same five 
+instruction sources the pretrain mix used, re-streamed and filtered far harder 
+(rretraining needs volume, this needs exemplars)
 
-**Prose stripping is the point of this file.** Every source's response is conversational -
-preamble, a fenced block, then an explanation. Pretraining supervised all of it, so a large
+To teach "English in -> Python out":
+
+1. Prose stripping is mandatory. Every source's response is conversational preamble, 
+a fenced block, then an explanation. Pretraining supervised all of it, so a large
 share of the tokens spent teaching "prompt in, code out" were actually teaching English.
-The completion kept here is exactly the fenced block, so effective code supervision rises
-at zero compute cost. The discarded fraction is measured and reported per source, because
-that number is the entire justification for the approach: if solutions were already 90%
-code there is nothing to win, and we should know that before training rather than after.
+- Completion kept is only the fenced block -> zero compute cost code supervision. 
 
-**On contamination.** The original design excluded SFT documents that appeared in the
-pretrain corpus. That check cannot be run, and finding out why is more useful than the check
-would have been: pretraining drew max_samples x mix_proportion documents per source, which
-against these pool sizes is one to two full epochs of every instruct source. There is no
-uncontaminated subset to hold out - the overlap is 100% by construction.
+2. There is no uncontaminated subset to hold out - the overlap is 100% by construction.
+pretraining drew max_samples x mix_proportion documents per source, which
+against these pool sizes is one to two full epochs of every instruct source. 
 
 That is fine for what SFT does here. It is not teaching new knowledge; it is re-weighting a
 distribution the model has already seen, with the loss masked to the completion and the
@@ -38,16 +36,14 @@ from collections import Counter, defaultdict
 
 from tqdm.auto import tqdm
 
-# Any fenced block, language tag captured. Unterminated fences are deliberately not
-# matched: a truncated answer is not an exemplar.
+# Any fenced block. Unterminated fences are deliberately not matched
 _FENCE_RE = re.compile(r"```([a-zA-Z0-9_+-]*)[ \t]*\n(.*?)```", re.DOTALL)
 _DEF_RE = re.compile(r"^\s*def\s+([A-Za-z_]\w*)", re.MULTILINE)
 _WORD_RE = re.compile(r"[a-z0-9_]+")
 
 PY_LANGS = {"", "python", "py", "python3"}
 
-# The prompt must actually ask for a program. A corpus whose every target is code has no
-# place for questions whose honest answer is a paragraph.
+# The prompt must actually ask for code.
 _ASKS_CODE = re.compile(
     r"\b(function|code|implement|write|create|program|script|class|method|algorithm|"
     r"def|snippet|generate|return|parse|compute|calculate|sort|convert)\b", re.I)
@@ -55,7 +51,7 @@ _CONCEPTUAL = re.compile(
     r"^\s*(what is|what are|why does|why is|explain|describe|when should|"
     r"what's the difference|how does)\b", re.I)
 
-# (repo, config, prompt column, response column, language column or None)
+# "dataset": (repo, config, prompt column, response column, language column or None)
 SOURCES = {
     "glaive":         ("glaiveai/glaive-code-assistant", None, "question", "answer", None),
     "tinycodes":      ("nampdn-ai/tiny-codes", None, "prompt", "response", "programming_language"),
@@ -75,13 +71,7 @@ def fenced_blocks(text: str) -> list[tuple[str, str]]:
 
 
 def normalized_ast(code: str) -> str | None:
-    """
-    AST dump with names and constants erased, used as a near-duplicate key.
-
-    The instruct pools are internally repetitive: the same solution reappears with renamed
-    variables and a reworded docstring. Hashing the source text misses those; hashing the
-    shape catches them. None if the code does not parse.
-    """
+    """ AST dump with names and constants erased, used as a near-duplicate key. """
     try:
         # Scraped code is full of unescaped regex literals; their SyntaxWarnings are noise
         # here, not signal - the code still parses and that is all this asks.
@@ -114,24 +104,14 @@ def words(text: str) -> set[str]:
 # ------------------------------------------------------------------------ benchmark guard
 
 def _bare_task(formatted: str) -> str:
-    """
-    Recover the benchmark's own wording from the '## Task / ## Solution' framing.
-
-    The framing words and the appended assert are shared by every task, so leaving them in
-    inflates the overlap between unrelated problems and washes out the signal.
-    """
+    """ Recover the benchmark's own wording from the '## Task / ## Solution' framing. """
     body = formatted.split("## Task\n", 1)[-1].split("\n\n## Solution", 1)[0]
     return "\n".join(ln for ln in body.splitlines()
                      if not ln.startswith("Your code should satisfy:"))
 
 
 def build_benchmark_index():
-    """
-    Map every benchmark entry-point name to the problem statements that use it.
-
-    Keying on the function name prunes cheaply - almost no document defines a colliding
-    name - so only the survivors pay for the word-overlap comparison.
-    """
+    """ Map every benchmark entry-point name to the problem statements that use it """
     from nanocoder.eval.tasks import load_mbpp, load_humaneval
     index = defaultdict(list)
     tasks = []
@@ -144,13 +124,13 @@ def build_benchmark_index():
 
 
 def leaks_benchmark(prompt: str, code: str, index, threshold: float = 0.7) -> bool:
-    """
-    A document leaks if it defines a benchmark's function and restates its problem.
+    """ 
+    Check if a document leaks by defining a benchmark's function and restates its problem.
 
     Overlap is measured against the *shorter* of the two word sets, not their union.
     Instruct prompts are chatty where MBPP is terse, so a document can restate a benchmark
     problem in full and still share only a third of the combined vocabulary - Jaccard scores
-    that as unrelated, which is exactly the leak we would miss.
+    that as unrelated, an easy leak to miss
     """
     names = set(_DEF_RE.findall(code))
     hits = [w for n in names if n in index for w in index[n]]
@@ -165,7 +145,7 @@ def leaks_benchmark(prompt: str, code: str, index, threshold: float = 0.7) -> bo
 # ------------------------------------------------------------------------------ filtering
 
 class Stats:
-    """Per-source accounting. The drop histogram is a deliverable, not a log line."""
+    """ Per-source accounting """
     def __init__(self):
         self.drops = Counter()
         self.kept = 0
@@ -183,12 +163,7 @@ class Stats:
 def filter_example(prompt: str, response: str, st: Stats, seen_shapes: set,
                    bench_index, min_code: int, max_code: int,
                    min_prompt: int, max_prompt: int, max_total: int) -> str | None:
-    """
-    Apply the quality filter in order, returning the stripped code or None.
-
-    Each step is a hypothesis about what makes a bad target. They run cheapest first, so
-    the expensive ones see fewer documents.
-    """
+    """ Apply the quality filters in order of least to most expensive """
     st.seen += 1
     prompt, response = prompt.strip(), response.strip()
     if not prompt or not response:

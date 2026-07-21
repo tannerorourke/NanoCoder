@@ -1,6 +1,6 @@
-""" Warmup + cosine-annealing LR schedule. """
 import math
 
+""" Warmup + cosine-annealing LR schedule. """
 class WarmupCosineAnnealing:
     def __init__(
         self,
@@ -36,3 +36,22 @@ class WarmupCosineAnnealing:
         lr = self._get_lr(self._it)
         self._apply(lr)
         self._it += 1
+
+"""
+Linear warmup -> hold. Used in SFT and RFT.
+- annealing wastes the pass and weights examples in the fixed set differently
+- warmup is still useful to ease into the new objective
+"""
+def constant_with_warmup(optimizer, base_lr: float, warmup_steps: int):
+    def _apply(step: int) -> float:
+        lr = base_lr
+        if step < warmup_steps:
+            lr = base_lr * (step + 1) / (warmup_steps + 1)
+        
+        for group in optimizer.param_groups:
+            group["lr"] = lr
+        return lr
+
+    # first step must run at warmup LR, not the optimizer's default
+    _apply(0)
+    return _apply

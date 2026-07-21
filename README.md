@@ -56,7 +56,7 @@ python -m nanocoder.tokenizer.build \
 **3 — Train the base model** → pushes `NanoCoder-123M-pretrain`
 
 ```bash
-python -m nanocoder.model.train \
+python -m nanocoder.model.pretrain \
     --tokenizer-repo <you>/NanoCoder-tokenizer \
     --repo-id        <you>/NanoCoder-123M-pretrain
 ```

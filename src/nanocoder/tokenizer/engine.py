@@ -124,9 +124,8 @@ class SemiSupervisedBPE:
     def bpe(self, token: str):
         # If the whole pre-token is known (special or locked tokens), return it,
         # effectively locking the token from being split.
-        # This is the entire "supervised" mechanism at encode time: locked kws were
-        # inserted into the encoder at __init__, so they short-circuit here before
-        # a single merge rule is ever consulted.
+        # locked kws were inserted into the encoder at __init__, so they short-circuit 
+        # here before a single merge rule is done (the "supervised" mechanism at encode time)
         if token in self.encoder:
             return token
 

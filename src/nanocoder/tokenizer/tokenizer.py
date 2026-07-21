@@ -1,13 +1,10 @@
 """
 NanoCoderTokenizer: portable wrapper around SemiSupervisedBPE.
 
-Handles everything specific to how NanoCoder sees text 
 - indent/dedent scope markers
-- the fenced-code preprocessing
-- HF-style save/load.
+- fenced-code preprocessing
+- HF-style save/load
 - FIM is deliberately NOT here; it operates on the tokenized id stream in 'nanocoder.data.corpus``.
-
-As a standalone tokenizer there is no reason to carry a torch.nn.module.
 """
 import json
 from pathlib import Path

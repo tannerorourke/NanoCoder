@@ -1,6 +1,5 @@
-"""
-Training loop, loss estimation, and live plotting.
-"""
+""" Pretraining loop + loss estimation, live plotting """
+
 import os
 import time
 

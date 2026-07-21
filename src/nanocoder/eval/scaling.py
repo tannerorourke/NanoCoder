@@ -1,23 +1,20 @@
 """Entrypoint
 
-The scaling curve: run the eval harness across the intermediate pretraining checkpoints.
+Run the eval harness across the intermediate pretraining checkpoints.
 
     python -m nanocoder.eval.scaling \
         --tokenizer-repo <user>/NanoCoder-tokenizer \
         --checkpoints checkpoints/nanocoder_2000.pt checkpoints/nanocoder_4000.pt \
                       checkpoints/nanocoder_6000.pt
 
-training/loop.py saves every 2000 iterations, so a completed run leaves three points on
-disk for free - roughly 0.79B, 1.57B and 2.36B tokens, or 6 / 13 / 19 tokens per parameter.
-
-Why this is worth the eval time: NanoCoder is knowingly undertrained, and the honest way
-to present that is to show it rather than footnote it. If parse rate and pass@1 are still
-climbing at the last checkpoint, the reader sees what a compute-limited model looks like
-mid-ascent, and "Chinchilla is the wrong yardstick when the size is fixed, not the
-compute" stops being a citation and becomes a measurement made in this repository.
+NanoCoder is knowingly undertrained, and the honest way to present that is to show it 
+rather than footnote it. If parse rate and pass@1 are still climbing at the last checkpoint, 
+the reader sees what a compute-limited model looks like mid-ascent, and "Chinchilla is the 
+wrong yardstick when the size is fixed, not the compute" stops being a citation and becomes a 
+measurement made in this repository.
 
 Correctness and parse rate are plotted as separate series on purpose. They come apart at
-this scale - form is learned long before function - and that gap is the thing the
+this scale - form is learned long before function - that gap is the thing the
 post-training stages are aimed at.
 """
 import argparse
@@ -91,12 +88,7 @@ def main():
 
     missing = [p for p in args.checkpoints if not os.path.exists(p)]
     if missing:
-        raise SystemExit(
-            f"Missing checkpoint(s): {missing}\n"
-            "These are written by training/loop.py every 2000 iterations. Without them the "
-            "curve needs a pretraining re-run, which this project has decided against - "
-            "drop the figure rather than rescue it."
-        )
+        raise SystemExit(f"Missing checkpoint(s): {missing}\n")
 
     from nanocoder.constants import resolve_device, seed_global
     from nanocoder.tokenizer.tokenizer import NanoCoderTokenizer

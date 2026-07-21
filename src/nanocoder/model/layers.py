@@ -12,8 +12,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+""" --- Root-mean-square normalization ---
+
+Applied to q and k per head before attention. 
+Keeps attention logits from blowing up, which enables training at
+higher LR without instability.
+"""
+
 class RMSNorm(nn.Module):
-    """ Root-mean-square normalization """
+    
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim))
@@ -26,10 +33,10 @@ class RMSNorm(nn.Module):
 
 """ --- Rotary Position Embedding (RoPE) --- 
 
-Positions injected by *rotating* q and k in 2D subspaces at a frequency that
-depends on the position, rather than added as a learned vector. The dot product
-q_m * k_n then depends only on the relative offset (m - n), which is why RoPE
-extrapolates to longer contexts far better than a learned position table.
+Positions injected by *rotating* q and k in 2D subspaces at frequency that depends
+on the position, as opposed to a learned vector. 
+Dot product q_m * k_n then depends only on the relative offset (m - n), reason why RoPE
+extrapolates to longer contexts much better than a learned position table
 """
 def build_rope_cache(seq_len: int, head_dim: int, base: float = 10000.0):
     inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))  # (hd/2,)
@@ -48,11 +55,12 @@ def apply_rope(x, cos, sin):
     sin = sin[None, None, :, :]
     return x * cos + rotate_half(x) * sin
 
-""" --- Causal Self-Attention (CSA) --- """
+""" --- Causal Self-Attention (CSA) --- 
+
+scaled_dot_product_attention is fused and uses Flash Attention under 
+the hood, an exponential memory efficiency boost, O(t) vs. O(t^2)
+"""
 class CausalSelfAttention(nn.Module):
-    """ Variant of standard transformer attention that only attends to positions 
-        *before* the current one. 
-    """
     def __init__(self, n_head: int, emb_dim: int, bias=False, dropout=0.0):
         super().__init__()
         assert emb_dim % n_head == 0
@@ -63,8 +71,6 @@ class CausalSelfAttention(nn.Module):
         self.c_proj = nn.Linear(emb_dim, emb_dim, bias=bias)
         self.c_proj._is_residual = True
 
-        # QK-norm: RMSNorm q and k (per head) before attention. Keeps attention logits
-        # from blowing up, which lets us train at a higher LR without instability.
         self.q_norm = RMSNorm(self.head_dim)
         self.k_norm = RMSNorm(self.head_dim)
         self.resid_drop = nn.Dropout(dropout)
@@ -79,11 +85,11 @@ class CausalSelfAttention(nn.Module):
         # QK-norm
         q = self.q_norm(q)
         k = self.k_norm(k)
-        # RoPE on q, k (not v)                
+        # RoPE on q, k
         q = apply_rope(q, cos, sin)
         k = apply_rope(k, cos, sin)  
 
-        # Flash/SDPA: fused, memory-efficient, causal mask applied internally
+        # Fused, memory-efficient, causal mask applied internally
         y = F.scaled_dot_product_attention(
             q, k, v, is_causal=True,
             dropout_p=self.dropout if self.training else 0.0,
@@ -94,10 +100,12 @@ class CausalSelfAttention(nn.Module):
 
 class SwiGLU(nn.Module):
     """ 
-    Gated MLP: down(silu(gate(x)) * up(x)). The gate lets the network modulate the
-    activation per-feature, which consistently beats a plain GELU block. We size the
-    hidden dim to 2/3 * 4 * emb_dim so the 3-matrix SwiGLU is *parameter-matched* to
-    the 2-matrix 4x GELU MLP it replaces (a fair swap, not a free capacity bump)
+    Gated MLP: down(silu(gate(x)) * up(x)). 
+    
+    Lets the network modulate the activation per-feature, which consistently beats 
+    a plain GELU block.
+    - Hidden dim sized to 2/3 * 4 * emb_dim so the 3-matrix SwiGLU is *parameter-matched* to
+      the 2-matrix 4x GELU MLP it replaces (a fair swap, not a free capacity bump)
     """
     def __init__(self, emb_dim: int, bias=False, dropout=0.0, mult: int = 4):
         super().__init__()
@@ -123,6 +131,6 @@ class Block(nn.Module):
         self.mlp   = SwiGLU(emb_dim, bias, dropout)
 
     def forward(self, x, cos, sin):
-        x = x + self.attn(self.norm1(x), cos, sin)          # pre-norm residual
+        x = x + self.attn(self.norm1(x), cos, sin) # pre-norm residual
         x = x + self.mlp(self.norm2(x))
         return x

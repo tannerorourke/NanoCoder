@@ -1,7 +1,11 @@
 """
-Architecture and training configuration (shared by the model and the trainer).
+Configuration for each stage.
 
-With vocab 49,152 and block 2048 the model is ~123M.
+NanoCoderConfig -> base model config (vocab=49,152, block=2048 -> ~123M params)
+TrainConfig     -> pretraining
+SFTConfig       -> Supervised Fine-Tuning
+RFTConfig       -> Reinforcement Fine-Tuning
+DPOConfig       -> Direct Preferece Optimization
 """
 from dataclasses import dataclass
 
@@ -64,3 +68,67 @@ class TrainConfig:
     # left-to-right). That both wastes capacity and teaches the model to emit <|fim_*|> 
     # as ordinary code tokens.
     fim_rate: float         = 0.15
+
+
+@dataclass
+class SFTConfig:
+    dtype = resolve_dtype()
+    # 512, not the pretrain 2048. Filtered instruction examples run ~200-500 tokens, so
+    # padding to the pretrain block would spend 75-85% of every batch on <|eos|> filler.
+    # RoPE extrapolates, so inference at 2048 is unaffected by training at 512.
+    block_size: int         = 512
+    batch_size: int         = 16
+    grad_accum_steps: int   = 4         # ~32k tokens/step, small next to pretrain's 393k
+    epochs: int             = 3
+    # --- logging
+    log_interval: int       = 25
+    eval_interval: int      = 250
+    eval_batches: int       = 20
+    # --- optimizer
+    base_lr: float          = 6e-5      # ~10% of the pretrain base
+    warmup_steps: int       = 100
+    weight_decay: float     = 0.1
+    betas: tuple[float, float] = (0.9, 0.95)
+    grad_clip: float        = 1.0
+    # No FIM. The sentinels never appear in an instruction prompt, and pretraining already taught infill
+    fim_rate: float         = 0.0
+
+
+@dataclass
+class RFTConfig(SFTConfig):
+    """
+    Same machinery as SFT, one epoch, lower LR.
+
+    The dataset is small and self-generated, so it is easy to overfit into the narrow slice
+    of behaviour the model already had right -a known failure of this method.
+    """
+    epochs: int             = 1
+    base_lr: float          = 2e-5
+    warmup_steps: int       = 40
+
+
+@dataclass
+class DPOConfig:
+    """Direct Preference Optimization
+    
+    Note the LR is 2orders of magnitude below SFT's.
+
+    DPO optimises a *relative* quantity, so nothing anchors the policy's absolute
+    likelihoods; at an SFT-sized LR it diverges loudly, driving both chosen and rejected
+    log-probs down while the margin still looks healthy. beta controls how far the policy
+    may drift from the reference - lower is freer, and 0.1 is the standard starting point.
+    """
+    dtype = resolve_dtype()
+    block_size: int         = 512
+    batch_size: int         = 4         # chosen and rejected both resident, so half of SFT
+    grad_accum_steps: int   = 8
+    epochs: int             = 1
+    beta: float             = 0.1
+    log_interval: int       = 10
+    eval_interval: int      = 100
+    eval_batches: int       = 20
+    base_lr: float          = 5e-7
+    warmup_steps: int       = 20
+    weight_decay: float     = 0.0       # the KL term to the reference is the regulariser
+    betas: tuple[float, float] = (0.9, 0.95)
+    grad_clip: float        = 1.0

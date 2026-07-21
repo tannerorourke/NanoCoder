@@ -1,20 +1,13 @@
 """Entrypoint
 
-Train the NanoCoder base model and push it to Hugging Face.
+Train the base model -> push to Hugging Face (requires a HF write token)
 
-Requires a write token (HF_TOKEN env var or `huggingface-cli login`)
-GPU strongly recommended.
-
-Notebook 3 ("NanoCoder: Base Model") is the narrated walkthrough of this script. 
-- Loads the Part-1 tokenizer
-- Streams + compiles the Part-1 corpus to uint16 token arrays,
-- Builds and train the GPT model
-- Pushes the full model (weights + config + tokenizer) to the Hub.
-
-    python -m nanocoder.model.train \
+    python -m nanocoder.model.pretrain \
         --tokenizer-repo <user>/NanoCoder-tokenizer \
         --pretrain-repo  <user>/NanoCoder-pretrain \
         --repo-id        <user>/NanoCoder-123M-pretrain
+
+GPU strongly recommended.
 """
 import argparse
 import os

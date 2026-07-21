@@ -1,23 +1,17 @@
 """Entrypoint
 
-pass@k over a checkpoint, with the failure breakdown that makes the number interpretable.
+pass@k over a checkpoint, reporting pass@1 / pass@5, parse rate, and an outcome histogram.
+Stream results to JSONL one sample at a time
 
     python -m nanocoder.eval.harness \
         --model <user>/NanoCoder-123M-pretrain \
         --benchmark mbpp --n-samples 5 --out results/base_mbpp.jsonl
 
-Reports three things, and the second and third are why this exists:
-
-- pass@1 / pass@5 (Chen et al.'s unbiased estimator, not a naive count).
+- pass@1 / pass@5 is Chen et al.'s unbiased estimator
 - parse rate, tracked as its own axis. At 123M these decouple hard from correctness, and
   holding them apart is what separates what SFT contributed from what DPO did.
-- the outcome histogram. "pass@1 is 0.02" says nothing actionable; "61% SYNTAX_ERROR" says
-  the model has not learned the output shape, which is a data problem, not a capacity one.
-
-Results stream to JSONL one sample at a time. Colab sessions disconnect, and a sweep that
-loses everything at 80% is a sweep nobody re-runs - so re-invoking with the same --out
-skips whatever is already on disk.
 """
+
 import argparse
 import json
 import os
@@ -27,16 +21,13 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from tqdm.auto import tqdm
 
+from nanocoder.model.decode import best_of_n, constrained_batch
 from nanocoder.eval.sandbox import Outcome, run_candidate
 from nanocoder.eval.tasks import LOADERS, extract_code
 
 
 def pass_at_k(n: int, c: int, k: int) -> float:
-    """
-    Unbiased pass@k: 1 - C(n-c, k) / C(n, k), the chance k draws from n samples miss all c
-    correct ones. Estimating it as "did any of the first k pass" is biased and noisy at the
-    sample counts a Colab budget allows.
-    """
+    """ Unbiased pass@k: 1 - C(n-c, k) / C(n, k), the chance k draws from n samples miss all c correct ones """
     if n - c < k:
         return 1.0
     return float(1.0 - np.prod(1.0 - k / np.arange(n - c + 1, n + 1)))
@@ -67,16 +58,12 @@ def evaluate(
     out_path: str | None = None,
     timeout: float = 10.0,
     exec_workers: int = 4,
+    constrained: bool = False,
+    best_of: int = 1,
     gen_kwargs: dict | None = None,
 ) -> dict:
-    """
-    Sample n completions per task, execute each, and aggregate.
-
-    Work is flattened to (task, sample) pairs and sorted by prompt length before batching.
-    Rows in a batch are padded to the longest prompt in it, so length-sorting means short
-    tasks are not dragged to a long task's width - a real saving when the harness has no KV
-    cache and every step re-reads the whole context.
-    """
+    """ Sample n completions per task + execute each + aggregate """
+    
     done = _load_done(out_path) if out_path else set()
     work = [(t, s) for t in tasks for s in range(n_samples) if (t.task_id, s) not in done]
     work.sort(key=lambda ts: len(ts[0].prompt))
@@ -88,15 +75,22 @@ def evaluate(
     try:
         for start in tqdm(range(0, len(work), batch_size), desc="sampling"):
             chunk = work[start:start + batch_size]
-            completions = nano.generate_batch(
-                [t.prompt for t, _ in chunk],
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                **(gen_kwargs or {}),
-            )
-
-            # Execution is subprocess-bound, so threads overlap it despite the GIL.
-            codes = [extract_code(c) for c in completions]
+            prompts = [t.prompt for t, _ in chunk]
+            if constrained:
+                # Constrained decoding hands back bare Python: the fence was supplied, not
+                # sampled, so there is nothing for extract_code to find.
+                fn = best_of_n if best_of > 1 else constrained_batch
+                kw = {"n": best_of} if best_of > 1 else {}
+                codes = fn(nano, prompts, max_new_tokens=max_new_tokens,
+                           temperature=temperature, **kw, **(gen_kwargs or {}))
+            else:
+                completions = nano.generate_batch(
+                    prompts,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    **(gen_kwargs or {}),
+                )
+                codes = [extract_code(c) for c in completions]
             with ThreadPoolExecutor(max_workers=exec_workers) as pool:
                 results = list(pool.map(
                     lambda a: run_candidate(a[0], a[1].test_code, a[1].setup_code, timeout),
@@ -130,6 +124,7 @@ def evaluate(
 
 def aggregate(records, n_samples: int) -> dict:
     """Roll per-sample records into pass@k, parse rate, and the outcome histogram."""
+    
     passes = defaultdict(int)
     counts = defaultdict(int)
     parses = 0
@@ -182,6 +177,11 @@ def main():
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--timeout", type=float, default=10.0)
     ap.add_argument("--out", default=None, help="JSONL path; also the resume file.")
+    ap.add_argument("--constrained", action="store_true",
+                    help="Forced fence prefix and fence stop. Default on for instruct "
+                         "checkpoints, off for the base model - the gap is the measurement.")
+    ap.add_argument("--best-of", type=int, default=1,
+                    help="Parse-filtered best-of-n. Requires --constrained.")
     ap.add_argument("--device", default=None)
     args = ap.parse_args()
 
@@ -209,6 +209,7 @@ def main():
         n_samples=args.n_samples, temperature=args.temperature,
         max_new_tokens=args.max_new_tokens, batch_size=args.batch_size,
         out_path=args.out, timeout=args.timeout,
+        constrained=args.constrained, best_of=args.best_of,
     )
     report(f"{args.model}{'@' + args.revision if args.revision else ''} / {args.benchmark}",
            summary)

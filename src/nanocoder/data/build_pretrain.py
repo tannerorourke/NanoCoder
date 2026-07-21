@@ -1,14 +1,13 @@
 """Entrypoint
 
-Build the NanoCoder-pretrain dataset and push it to the Hub.
-Requires a write token (HF_TOKEN env var or `huggingface-cli login`)
+Build the NanoCoder-pretrain dataset and push it to HF (requires HF write token)
+
+    python -m nanocoder.data.build_pretrain --repo-id <user>/NanoCoder-pretrain
 
 Notebook 1 ("NanoCoder: Dataset") is the walkthrough of this script
 - Streams + filters the sources (nanocoder.data.sources.build_dataset)
 - Materialises train/val text
 - Pushes a DatasetDict to HuggingFace Datasets
-
-    python -m nanocoder.data.build_pretrain --repo-id <user>/NanoCoder-pretrain
 """
 import argparse
 
@@ -23,7 +22,7 @@ def main():
                     help="Hub dataset repo to push to.")
     ap.add_argument("--private", action="store_true", help="Create the repo as private.")
     ap.add_argument("--no-push", action="store_true",
-                    help="Build and report only; skip the Hub push.")
+                    help="Build and report only; skip HF push.")
     ap.add_argument("--max-samples", type=int, default=None,
                     help="Override DatasetConfig.max_samples (e.g. small smoke run).")
     args = ap.parse_args()

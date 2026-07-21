@@ -1,15 +1,7 @@
 """
-Benchmark loading, normalised to one shape: (task_id, prompt, test_code, entry_point).
-
-Two jobs, both about not measuring the wrong thing.
-
-Prompts are rewritten into the '## Task ... ## Solution' form the model was actually
-pretrained on. Feeding HumanEval's bare function signature to a model that never saw one
-in that position measures format mismatch, not ability.
-
-Answers are extracted from the fenced block the model was trained to emit. Everything
-outside the fence is prose and would not survive ast.parse, so leaving it in would report
-a syntax error for a solution that was fine.
+Benchmark loading normalised to (task_id, prompt, test_code, entry_point).
+- Prompts are rewritten into the '## Task ... ## Solution' form the model was pretrained on.
+- Answers are extracted from the fenced block the model was trained to emit.
 """
 import re
 from dataclasses import dataclass, field
@@ -32,15 +24,7 @@ class Task:
 
 
 def extract_code(completion: str) -> str:
-    """
-    Pull the Python out of a completion.
-
-    First fenced block wins. An unterminated fence still counts - the model running out of
-    budget mid-block is a truncation, not a refusal, and scoring it as empty would
-    understate the parse rate we are trying to measure. With no fence at all we return the
-    text as-is and let the parser decide, which is the honest reading for a base model that
-    never learned the fence.
-    """
+    """ Pull the Python out of a completion """
     m = _FENCE_RE.search(completion)
     if m:
         return m.group(1).strip("\n")
@@ -56,13 +40,9 @@ def load_mbpp(split: str = "test", limit: int | None = None) -> list[Task]:
     """
     MBPP: a plain-language sentence plus a handful of asserts.
 
-    The primary benchmark here, and deliberately so - short functions specified in English
-    are exactly the distribution the instruction sources trained on, and it carries roughly
-    3x HumanEval's task count, which matters more than breadth on a Colab budget.
-
-    The prompt is augmented with the first assert. MBPP's text alone does not pin down the
-    function name, so without it a correct solution fails on NameError and the benchmark
-    scores naming luck. This is the standard MBPP convention, not a concession.
+    primary benchmark - short functions specified in English are exactly the distribution 
+    the instruction sources trained on, which carries roughly 3x HumanEval's task count and matters 
+    more than breadth on a Colab budget.
     """
     from datasets import load_dataset
     ds = load_dataset("google-research-datasets/mbpp", "full", split=split)
@@ -87,13 +67,7 @@ def load_mbpp(split: str = "test", limit: int | None = None) -> list[Task]:
 
 
 def load_humaneval(limit: int | None = None) -> list[Task]:
-    """
-    HumanEval: a signature and docstring, tested by a generated check() function.
-
-    Secondary. The signature is handed over verbatim inside the task description so the
-    model can copy it rather than invent a name, and the candidate is expected to redefine
-    the whole function - which is what the '## Solution' format asks for anyway.
-    """
+    """ HumanEval (Secondary benchmark): a signature and docstring, tested by a generated check() function """
     from datasets import load_dataset
     ds = load_dataset("openai/openai_humaneval", split="test")
     tasks = []

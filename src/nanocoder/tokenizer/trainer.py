@@ -1,10 +1,4 @@
-"""
-Callable for the BPE trainer to learn the merge table from a corpus.
-
-"GPT-2" shipped the *encoder* but never the trainer; this is the from-scratch version.
-The pair_counts / pair_to_words inverted index keeps it efficient (a merge only
-touches the words that actually contained the merged pair).
-"""
+""" Callable for the BPE trainer to learn the merge table from a corpus """
 from collections import Counter, defaultdict
 
 from tqdm.auto import tqdm
@@ -13,9 +7,7 @@ from nanocoder.tokenizer.engine import SemiSupervisedBPE
 
 
 def train_bpe(tokenizer: SemiSupervisedBPE, texts: list[str], vocab_size: int):
-    """ Perform byte pair merges over a subset of our dataset's texts until the vocab
-        reaches vocab_size. See the section above for the algorithm and why the
-        pair_counts/pair_to_words index is what keeps it tractable. """
+    """ Perform byte pair merges over a subset of texts until the vocab reaches vocab_size """
     # count pre-token frequencies
     word_freqs = Counter()
     for t in tqdm(texts, desc="Counting frequencies"):
@@ -41,7 +33,7 @@ def train_bpe(tokenizer: SemiSupervisedBPE, texts: list[str], vocab_size: int):
     assert pair_counts, "No pairs found"
 
     def count_adj_pairs(pieces):
-        """Count adjacent pairs in one word (unweighted; caller multiplies by freq)."""
+        """ Count adjacent pairs in one word (unweighted; caller multiplies by freq) """
         c: Counter = Counter()
         for j in range(len(pieces) - 1):
             c[(pieces[j], pieces[j + 1])] += 1

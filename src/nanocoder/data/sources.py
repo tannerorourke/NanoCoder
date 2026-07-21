@@ -1,6 +1,4 @@
-"""
-build_dataset[Callable]: stream + filter the sources into the interleaved pretrain corpus.
-"""
+""" Stream + Filter the sources into the interleaved pretrain corpus """
 import gc
 
 from tqdm.auto import tqdm
@@ -12,7 +10,7 @@ def build_dataset(dcfg) -> tuple[list[str], list[str]]:
     from datasets import load_dataset, interleave_datasets
     caps = dcfg.max_chars
 
-    # --- language heuristics (used only where a source has no language column)
+    # --- language heuristics (only for when a source has no language column)
     non_py_kws = ['public class ', 'std::', 'printf(', 'fn main()', 'namespace ',
                   'extern ', 'await fetch', 'System.out.print', 'using namespace std']
     non_py_langs = ['javascript', 'js ', 'java ', 'cpp', 'c++', 'rust',
@@ -26,7 +24,7 @@ def build_dataset(dcfg) -> tuple[list[str], list[str]]:
 
     has_text = lambda ex: ex.get('text')
 
-    # --- maps: every source is normalised to a single 'text' field
+    # --- maps every source to a single 'text' field
     def as_task(ex, p_col, r_col):
         p, r = (ex.get(p_col) or '').strip(), (ex.get(r_col) or '').strip()
         return {"text": f"## Task\n{p}\n\n## Solution\n{r}" if (p and r) else None}
@@ -43,18 +41,15 @@ def build_dataset(dcfg) -> tuple[list[str], list[str]]:
 
     # --- streams. Each is filtered to Python, capped at its own natural length,
     #     then normalised to 'text'.
-    COSMO_FMT = ['textbook', 'textbook_unconditionned_topic', 'wikihow', 'textbook_narrative',
-                 'e-learning_module', 'textbook_academic', 'scientific_article']
-
     streams = {}
 
-    # (1) fluency + FIM: real Python files, the only source that teaches file-shape
+    # Raw Python files, the only source that teaches fluency + FIM + file-shape
     streams["codeparrot"] = (
         load_dataset("codeparrot/codeparrot-clean", split='train', streaming=True)
         .filter(lambda ex: 0 < len(ex['content']) < caps["codeparrot"])
         .map(as_fenced_py).filter(has_text))
 
-    # (2-6) the prompt -> code interface
+    # Instruction sets
     streams["glaive"] = (
         load_dataset("glaiveai/glaive-code-assistant", split='train', streaming=True)
         .filter(lambda ex: len(ex['answer']) < caps["glaive"]
@@ -85,7 +80,10 @@ def build_dataset(dcfg) -> tuple[list[str], list[str]]:
                 and len(ex['solution']) < caps["magicoder_oss"])
         .map(lambda ex: as_task(ex, 'problem', 'solution')).filter(has_text))
 
-    # (7) technical language, for the questions whose answer isn't a function
+    # technical language, for the questions whose answer isn't a function
+    COSMO_FMT = ['textbook', 'textbook_unconditionned_topic', 'wikihow', 'textbook_narrative',
+                     'e-learning_module', 'textbook_academic', 'scientific_article']
+    
     streams["cosmo"] = (
         load_dataset("HuggingFaceTB/smollm-corpus", "cosmopedia-v2", split='train', streaming=True)
         .filter(lambda ex: len(ex['text']) < caps["cosmo"]

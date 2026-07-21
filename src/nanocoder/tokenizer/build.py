@@ -1,16 +1,10 @@
 """Entrypoint
 
-Train the NanoCoder tokenizer and push it to the Hub. 
-
-Notebook 2 ("NanoCoder: Tokenizer") is the narrated walkthrough of this script. 
-Loads the NanoCoder-pretrain dataset (from Part 1), trains the Semi-Supervised BPE on a
-sample of it, verifies the save/load round-trip, and pushes the tokenizer to the Hub.
+Train the NanoCoder tokenizer and push to HF (requires HF write token)
 
     python -m nanocoder.tokenizer.build \
         --pretrain-repo <user>/NanoCoder-pretrain \
         --repo-id <user>/NanoCoder-tokenizer
-
-Requires a write token (HF_TOKEN env var or `huggingface-cli login`).
 """
 import argparse
 import os

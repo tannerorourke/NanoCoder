@@ -1,12 +1,7 @@
-"""NanoCoder: the portable model wrapper (weights + config + tokenizer).
-
-Bundles the GPT, its config, and the tokenizer into one object that round-trips to
-disk and to the Hub. save_pretrained writes weights, config, and tokenizer together,
-so any checkpoint loads standalone - no revision depends on another.
-
-Hub access goes through huggingface_hub directly. Dropping transformers' PushToHubMixin
-removed the package's last dependency on transformers, which a from-scratch model has
-no reason to carry.
+"""
+Portable model wrapper holding the model, config, and tokenizer used for 
+model interaction and bundling for HuggingFace.
+- save_pretrained writes weights, config, and tokenizer together
 """
 import json
 import os
@@ -73,14 +68,7 @@ class NanoCoder(torch.nn.Module):
         commit_message: str = "Push NanoCoder",
         token: str | None = None,
     ) -> str:
-        """
-        Save to a temp dir and upload the folder.
-
-        Replaces transformers' PushToHubMixin: that was the package's only dependency on
-        transformers, for a method that is a create_repo + upload_folder underneath.
-        'revision' targets a branch, which is how the post-trained stages are published
-        side by side on one repo.
-        """
+        """ Save to a temp dir and upload the folder """
         from huggingface_hub import HfApi
         api = HfApi(token=token)
         api.create_repo(repo_id, repo_type="model", private=private, exist_ok=True)
@@ -110,6 +98,7 @@ class NanoCoder(torch.nn.Module):
         min_new_tokens: int = 8,
         suppress_fim: bool = True,
         return_prompt: bool = False,
+        stop_ids: list[int] | None = None,
         device: str | None = None,
     ) -> list[str]:
         """
@@ -119,20 +108,16 @@ class NanoCoder(torch.nn.Module):
         one-at-a-time sampling makes that the dominant cost of the whole project. Without
         a KV cache each step still re-reads the full context, but batching amortises that
         across the batch, so 64 completions cost about what one used to.
-
-        Prompts are right-padded, never left-padded. Attention is causal with no padding
-        mask, so a real token must never sit after a pad - right-padding guarantees that,
-        and it also keeps each row's RoPE positions starting at zero. The cost is that
-        each row's next token lives at its own column, which is what 'pos' on GPT.forward
-        is for.
-
-        Sampling knobs match generate_text:
-        - top_p (nucleus) trims the long tail top_k alone leaves.
+        
+        - top_p (nucleus) trims the long tail top_k alone leaves
         - repetition_penalty divides the logits of tokens already in the row, curbing the
           "function's function's" / "lo = lo" loops a small model falls into.
         - suppress_fim masks the FIM sentinels, which are only meaningful when the prompt
           is itself in FIM format. Letting them fire during a normal left-to-right
           completion is what produces <|fim_*|> garbage mid-answer.
+        - stop_ids halt a row on any of these tokens as well as <|eos|>. The stopping token
+          is kept, so a closing fence ends up inside the returned text rather than beside
+          it. See model/decode.py, which uses this to make trailing prose impossible.
         """
         assert self.tokenizer is not None, "Tokenizer not found"
         if not prompts:
@@ -170,6 +155,10 @@ class NanoCoder(torch.nn.Module):
         rows = torch.arange(B, device=device)
         finished = torch.zeros(B, dtype=torch.bool, device=device)
         gen_len = torch.zeros(B, dtype=torch.long, device=device)   # tokens kept per row
+
+        # <|eos|> plus any caller-supplied halt tokens, deduped.
+        halts = sorted({*(stop_ids or []), *([eos] if eos is not None else [])})
+        halt_t = torch.tensor(halts, device=device) if halts else None
 
         with self._autocast(device):
             for step in range(max_new_tokens):
@@ -211,9 +200,11 @@ class NanoCoder(torch.nn.Module):
 
                 buf[rows, lens] = nxt
                 lens += 1
+                # Counted before the halt check, so the stopping token is kept - a closing
+                # fence belongs inside the completion, not after it.
                 gen_len += (~finished).long()      # a finished row contributes nothing more
-                if eos is not None:
-                    finished |= (nxt == eos)
+                if halt_t is not None:
+                    finished |= torch.isin(nxt, halt_t)
                     if bool(finished.all()):
                         break
 

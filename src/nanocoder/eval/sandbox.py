@@ -1,14 +1,5 @@
 """
-Run one generated solution against one test suite, in a process we are willing to lose.
-
-Generated code is hostile by accident: a 123M model writes infinite loops, unbounded
-recursion, sys.exit, and allocations that eat the machine. None of that may reach the
-harness, so every candidate runs in its own interpreter behind a wall-clock timeout and
-an address-space cap.
-
-The return is a typed outcome rather than a bool. What a small model fails *at* is the
-diagnostic - SYNTAX_ERROR and FAIL are different problems with different fixes - and the
-preference-pair construction later keys off the same distinction.
+Run one generated solution against one test suite in a confined environment.
 """
 import ast
 import os
@@ -20,10 +11,10 @@ from enum import Enum
 
 
 class Outcome(str, Enum):
-    PASS = "PASS"                   # ran to completion, every assertion held
-    FAIL = "FAIL"                   # ran, an assertion did not hold - wrong answer
+    PASS = "PASS"                   # ran to completion, all assertions held
+    FAIL = "FAIL"                   # an assertion did not hold - wrong answer
     TIMEOUT = "TIMEOUT"             # did not terminate in the budget
-    SYNTAX_ERROR = "SYNTAX_ERROR"   # not parseable Python at all
+    SYNTAX_ERROR = "SYNTAX_ERROR"   # not parseable Python
     NAME_ERROR = "NAME_ERROR"       # undefined name, usually the entry point was never defined
     ERROR = "ERROR"                 # any other uncaught exception
 
@@ -31,7 +22,7 @@ class Outcome(str, Enum):
 @dataclass
 class ExecResult:
     outcome: Outcome
-    detail: str = ""                # last stderr line, for the failure histogram
+    detail: str = ""                # last stderr line for failure histogram
 
     @property
     def passed(self) -> bool:
