@@ -11,9 +11,9 @@ import torch
 def resolve_dtype() -> torch.dtype:
     """
     Pick widest autocast dtype GPU supports.
-    - Turing (T4, the free Colab card) does fp16 but not bf16
-    - Ampere (V100, the paid Colab card) does bf16
-    - Otherwise CPU
+    - Ampere and later (A100, L4 - the paid Colab cards) do bf16
+    - Volta (V100), Turing (T4) Turing (free Colab cards) do fp16 but not bf16
+    - Otherwise float32 for precision on CPU
     """
     if not torch.cuda.is_available():
         return torch.float32

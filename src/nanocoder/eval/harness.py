@@ -3,7 +3,7 @@
 pass@k over a checkpoint, with the failure breakdown that makes the number interpretable.
 
     python -m nanocoder.eval.harness \
-        --model <user>/NanoCoder-123M \
+        --model <user>/NanoCoder-123M-pretrain \
         --benchmark mbpp --n-samples 5 --out results/base_mbpp.jsonl
 
 Reports three things, and the second and third are why this exists:

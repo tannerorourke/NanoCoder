@@ -67,7 +67,7 @@ def plot_curve(points, out_path: str = "scaling_curve.png"):
     ax.plot(toks, [p["pass@1"] for p in points], marker="s", label="pass@1")
     ax.set_xlabel("training tokens (B)")
     ax.set_ylabel("fraction")
-    ax.set_title("NanoCoder-123M: correctness vs tokens seen")
+    ax.set_title("NanoCoder-123M-pretrain: correctness vs tokens seen")
     ax.set_ylim(bottom=0)
     ax.grid(alpha=0.3)
     ax.legend()

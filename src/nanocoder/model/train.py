@@ -14,7 +14,7 @@ Notebook 3 ("NanoCoder: Base Model") is the narrated walkthrough of this script.
     python -m nanocoder.model.train \
         --tokenizer-repo <user>/NanoCoder-tokenizer \
         --pretrain-repo  <user>/NanoCoder-pretrain \
-        --repo-id        <user>/NanoCoder-123M
+        --repo-id        <user>/NanoCoder-123M-pretrain
 """
 import argparse
 import os
@@ -50,7 +50,7 @@ def main():
     ap = argparse.ArgumentParser(description="Train & push the NanoCoder base model.")
     ap.add_argument("--tokenizer-repo", default="torq1/NanoCoder-tokenizer")
     ap.add_argument("--pretrain-repo", default="torq1/NanoCoder-pretrain")  # reserved for a Dataset-backed loader
-    ap.add_argument("--repo-id", default="torq1/nano-coder-123M")
+    ap.add_argument("--repo-id", default="torq1/NanoCoder-123M-pretrain")
     ap.add_argument("--save-dir", default="./nano-coder-export")
     ap.add_argument("--device", default=None, help="Override device (default: auto).")
     ap.add_argument("--private", action="store_true")

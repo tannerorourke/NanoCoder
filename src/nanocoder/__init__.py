@@ -13,6 +13,7 @@ from nanocoder.model.nanocoder import NanoCoder
 from nanocoder.data.config import DatasetConfig, suptok_config
 from nanocoder.data.sources import build_dataset
 from nanocoder.data.corpus import compile_corpus, apply_token_fim, get_batch
+from nanocoder.data.sft import SFTExample, encode_example, build_labels, sft_batches
 
 from nanocoder.training.config import NanoCoderConfig, TrainConfig
 from nanocoder.training.schedule import WarmupCosineAnnealing
@@ -24,6 +25,7 @@ __all__ = [
     "GPT", "NanoCoder",
     "DatasetConfig", "suptok_config", "build_dataset",
     "compile_corpus", "apply_token_fim", "get_batch",
+    "SFTExample", "encode_example", "build_labels", "sft_batches",
     "NanoCoderConfig", "TrainConfig", "WarmupCosineAnnealing", "train_loop",
 ]
 
