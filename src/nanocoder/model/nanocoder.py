@@ -20,7 +20,7 @@ from contextlib import nullcontext
 
 from nanocoder.model.gpt import GPT
 from nanocoder.tokenizer.tokenizer import NanoCoderTokenizer
-from nanocoder.training.config import NanoCoderConfig
+from nanocoder.training.config import NanoCoderConfig, resolve_dtype
 
 
 class NanoCoder(torch.nn.Module):
@@ -62,8 +62,8 @@ class NanoCoder(torch.nn.Module):
         tokenizer = None
         if os.path.exists(os.path.join(load_dir, 'tokenizer.json')):
             tokenizer = NanoCoderTokenizer.from_pretrained(load_dir)
-
-        return cls(model=model, config=config, tokenizer=tokenizer)
+        
+        return cls(model=model, config=config, tokenizer=tokenizer, device=device)
 
     def push_to_hub(
         self,
@@ -92,59 +92,105 @@ class NanoCoder(torch.nn.Module):
                               commit_message=commit_message, revision=revision)
         return f"https://huggingface.co/{repo_id}"
 
+    def _autocast(self, device):
+        """Autocast in whatever half precision the card supports, or not at all on CPU."""
+        if not str(device).startswith('cuda'):
+            return nullcontext()
+        return torch.autocast(device_type='cuda', dtype=resolve_dtype())
+
     @torch.no_grad()
-    def generate_text(
+    def generate_batch(
         self,
-        prompt: str,
+        prompts: list[str],
         max_new_tokens: int = 256,
         temperature: float = 1.0,
-        top_k: int = 40,
-        top_p: float = 0.95,
+        top_k: int | None = 40,
+        top_p: float | None = 0.95,
         repetition_penalty: float = 1.15,
         min_new_tokens: int = 8,
         suppress_fim: bool = True,
+        return_prompt: bool = False,
         device: str | None = None,
-    ) -> str:
-        """ Autoregressive sampling.
+    ) -> list[str]:
+        """
+        Sample many completions in one set of forward passes.
 
-        - top_p (nucleus) trims the long tail top_k alone leaves; 
-        - repetition_penalty divides the logits of already-generated tokens to 
-          curb the "function's function's" / "lo = lo" loops a small model falls into. 
-        - suppress_fim masks the FIM sentinels: they're only meaningful when the 
-          *prompt* is in FIM format, letting them fire during a normal left-to-right 
+        The eval sweep and the preference sampling run are both m tasks x n samples, and
+        one-at-a-time sampling makes that the dominant cost of the whole project. Without
+        a KV cache each step still re-reads the full context, but batching amortises that
+        across the batch, so 64 completions cost about what one used to.
+
+        Prompts are right-padded, never left-padded. Attention is causal with no padding
+        mask, so a real token must never sit after a pad - right-padding guarantees that,
+        and it also keeps each row's RoPE positions starting at zero. The cost is that
+        each row's next token lives at its own column, which is what 'pos' on GPT.forward
+        is for.
+
+        Sampling knobs match generate_text:
+        - top_p (nucleus) trims the long tail top_k alone leaves.
+        - repetition_penalty divides the logits of tokens already in the row, curbing the
+          "function's function's" / "lo = lo" loops a small model falls into.
+        - suppress_fim masks the FIM sentinels, which are only meaningful when the prompt
+          is itself in FIM format. Letting them fire during a normal left-to-right
           completion is what produces <|fim_*|> garbage mid-answer.
         """
         assert self.tokenizer is not None, "Tokenizer not found"
+        if not prompts:
+            return []
         device = device or self.device
         enc = self.tokenizer._engine.encoder
-
-        self.model.eval()
-        ids = self.tokenizer.encode(prompt)
-        idx = torch.tensor([ids], dtype=torch.long, device=device)
         eos = enc.get(self.tokenizer.eos_token_id)
-        b_size = self.config.block_size
+        vocab = self.config.vocab_size
+        self.model.eval()
 
-        # Only suppress FIM if the prompt itself isn't a FIM prompt.
-        fim_ids = []
-        if suppress_fim and "<|fim_prefix|>" not in prompt:
-            fim_ids = [enc[t] for t in ("<|fim_prefix|>", "<|fim_middle|>", "<|fim_suffix|>")
-                       if t in enc]
+        encoded = [self.tokenizer.encode(p) for p in prompts]
+        plens = [len(ids) for ids in encoded]
+        B, T0 = len(encoded), max(plens)
+        assert T0 + max_new_tokens <= self.config.block_size, (
+            f"prompt {T0} + {max_new_tokens} new exceeds block_size "
+            f"{self.config.block_size}; shorten the prompt or max_new_tokens"
+        )
 
-        actx = (torch.autocast(device_type='cuda', dtype=torch.bfloat16)
-                if str(device).startswith('cuda') else nullcontext())
-        with actx:
+        # Preallocate the full width once. Filler is <|eos|> and is never read: every
+        # row's live span is [0, lens[i]) and only grows.
+        fill = eos if eos is not None else 0
+        buf = torch.full((B, T0 + max_new_tokens), fill, dtype=torch.long, device=device)
+        for i, ids in enumerate(encoded):
+            buf[i, :len(ids)] = torch.tensor(ids, dtype=torch.long, device=device)
+        lens = torch.tensor(plens, dtype=torch.long, device=device)
+
+        # Suppress FIM per row: a row whose own prompt is a FIM prompt keeps its sentinels.
+        fim_ids = [enc[t] for t in ("<|fim_prefix|>", "<|fim_middle|>", "<|fim_suffix|>")
+                   if t in enc]
+        fim_rows = torch.tensor([suppress_fim and "<|fim_prefix|>" not in p for p in prompts],
+                                device=device)
+        fim_cols = (torch.tensor(fim_ids, dtype=torch.long, device=device)
+                    if fim_ids and bool(fim_rows.any()) else None)
+
+        rows = torch.arange(B, device=device)
+        finished = torch.zeros(B, dtype=torch.bool, device=device)
+        gen_len = torch.zeros(B, dtype=torch.long, device=device)   # tokens kept per row
+
+        with self._autocast(device):
             for step in range(max_new_tokens):
-                idx_cond = idx if idx.size(1) <= b_size else idx[:, -b_size:]
-                logits, _ = self.model(idx_cond)
-                logits = logits[:, -1, :]
+                width = T0 + step
+                logits, _ = self.model(buf[:, :width], pos=lens - 1)
+                logits = logits[:, -1, :].float()
 
-                # repetition penalty over tokens already in the context
                 if repetition_penalty != 1.0:
-                    for t in set(idx[0].tolist()):
-                        logits[0, t] /= repetition_penalty
+                    # Scatter only over live positions: park pad columns in a trash
+                    # column at index vocab so filler <|eos|> is not penalised, which
+                    # would bias short-prompt rows against ever stopping.
+                    live = torch.arange(width, device=device)[None, :] < lens[:, None]
+                    tok = torch.where(live, buf[:, :width], vocab)
+                    seen = torch.zeros(B, vocab + 1, dtype=torch.bool, device=device)
+                    seen.scatter_(1, tok, True)
+                    seen = seen[:, :vocab]
+                    logits = torch.where(seen, logits / repetition_penalty, logits)
 
-                if fim_ids:
-                    logits[:, fim_ids] = float('-inf')
+                if fim_cols is not None:
+                    logits[:, fim_cols] = logits[:, fim_cols].masked_fill(
+                        fim_rows[:, None], float('-inf'))
                 if eos is not None and step < min_new_tokens:
                     logits[:, eos] = float('-inf')   # don't stop on an empty answer
 
@@ -154,15 +200,30 @@ class NanoCoder(torch.nn.Module):
                     logits = logits.masked_fill(logits < v[:, [-1]], float('-inf'))
                 if top_p is not None:
                     sl, si = torch.sort(logits, descending=True)
-                    cum = torch.cumsum(F.softmax(sl, dim=-1), dim=-1)
-                    mask = cum - F.softmax(sl, dim=-1) > top_p   # keep tokens up to top_p mass
-                    sl[mask] = float('-inf')
+                    probs = F.softmax(sl, dim=-1)
+                    mask = torch.cumsum(probs, dim=-1) - probs > top_p  # keep up to top_p mass
+                    sl = sl.masked_fill(mask, float('-inf'))
                     logits = torch.full_like(logits, float('-inf')).scatter(1, si, sl)
 
-                probs = F.softmax(logits, dim=-1)
-                idx_next = torch.multinomial(probs, num_samples=1)
-                idx = torch.cat((idx, idx_next), dim=1)
-                if eos is not None and idx_next.item() == eos:
-                    break
+                nxt = torch.multinomial(F.softmax(logits, dim=-1), num_samples=1).squeeze(1)
+                if eos is not None:
+                    nxt = torch.where(finished, torch.full_like(nxt, eos), nxt)
 
-        return self.tokenizer.decode(idx[0].tolist())
+                buf[rows, lens] = nxt
+                lens += 1
+                gen_len += (~finished).long()      # a finished row contributes nothing more
+                if eos is not None:
+                    finished |= (nxt == eos)
+                    if bool(finished.all()):
+                        break
+
+        out = []
+        for i, plen in enumerate(plens):
+            start = 0 if return_prompt else plen
+            out.append(self.tokenizer.decode(buf[i, start:plen + int(gen_len[i])].tolist()))
+        return out
+
+    def generate_text(self, prompt: str, **kwargs) -> str:
+        """One prompt in, prompt + completion out. A batch of one over generate_batch."""
+        kwargs.setdefault("return_prompt", True)
+        return self.generate_batch([prompt], **kwargs)[0]

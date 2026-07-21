@@ -1,9 +1,8 @@
 """
 GPT-2 style model.
 
-``NanoCoderConfig' lives in
-``nanocoder.training.config' (shared with the trainer); the model imports it from
-there. Verbatim from the notebook otherwise.
+NanoCoderConfig lives in nanocoder.training.config, shared with the trainer, so the
+model imports it from there. Verbatim from the notebook otherwise.
 """
 import torch
 import torch.nn as nn
@@ -45,7 +44,16 @@ class GPT(nn.Module):
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, pos=None):
+        """
+        idx: (B, T) embedded input
+        pos: (B,) read positions for the inference path, one per row, default is last column.
+        targets: (B, T) for training
+        
+        Batched generation right-pads prompts to a common width, so each row's next token has
+        to be read from its own end rather than a shared one - projecting only those B positions 
+        keeps the head off a (B, T, vocab) tensor (gb for batch of any size).
+        """
         B, T = idx.size()
         cos, sin = self.rope_cos[:T], self.rope_sin[:T]
 
@@ -59,6 +67,9 @@ class GPT(nn.Module):
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
             return logits, loss
 
-        # inference path, only project the last position
-        logits = self.lm_head(x[:, [-1], :])
-        return logits, None
+        # inference path, project one position per row
+        if pos is None:
+            x = x[:, [-1], :]
+        else:
+            x = x[torch.arange(B, device=x.device), pos].unsqueeze(1)
+        return self.lm_head(x), None

@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nanocoder"
+version = "0.1.0"
+description = "A GPT2-style code LM, BPE tokenizer, and dataset built from scratch as an educational walkthrough."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Tanner O'Rourke" }]
+requires-python = ">=3.10"
+keywords = ["language-model", "transformer", "bpe", "tokenizer", "education"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# Lower bounds only. Colab ships its own torch, and an upper pin here forces a
+# reinstall that costs more wall-clock than a training run - and risks a CUDA
+# mismatch. 3.10 is the floor because the codebase uses PEP 604 unions (str | None).
+dependencies = [
+    "torch>=2.1",
+    "numpy>=1.24",
+    "regex>=2023.0.0",     # tokenizer split patterns need \p{...} classes stdlib re lacks
+    "tqdm>=4.65",
+    "datasets>=2.14",
+    "huggingface_hub>=0.23",
+]
+
+[project.optional-dependencies]
+# Live training plots. Kept out of the base install so a notebook's first cell is fast;
+# training/loop.py imports it lazily and only when a plot_handle is passed.
+plot = ["matplotlib>=3.7"]
+
+[project.urls]
+Repository = "https://github.com/tannerorourke/NanoCoder"
+
+[tool.setuptools.packages.find]
+where = ["src"]

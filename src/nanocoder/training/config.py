@@ -8,6 +8,20 @@ from dataclasses import dataclass
 import torch
 
 
+def resolve_dtype() -> torch.dtype:
+    """
+    Pick widest autocast dtype GPU supports.
+    - Turing (T4, the free Colab card) does fp16 but not bf16
+    - Ampere (V100, the paid Colab card) does bf16
+    - Otherwise CPU
+    """
+    if not torch.cuda.is_available():
+        return torch.float32
+    if torch.cuda.is_bf16_supported():
+        return torch.bfloat16 # Ampere and later: wider exponent, no scaler needed
+    return torch.float16      # Turing: half throughput of bf16 but 8x fp32
+
+
 @dataclass
 class NanoCoderConfig:
     # ~123M params with vocab=49,152 / block=2048
@@ -24,7 +38,7 @@ class NanoCoderConfig:
 @dataclass
 class TrainConfig:
     # ---- runtime
-    dtype = torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported()) else torch.float32
+    dtype = resolve_dtype()
     # 40GB-safe defaults: 8 * 2048 * 24 accum = ~393k tokens / optimizer step.
     # On an 80GB A100 you have plenty of room -> raise batch_size and lower
     # grad_accum_steps for the same effective batch at higher throughput.
