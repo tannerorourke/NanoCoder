@@ -24,7 +24,7 @@ Because NanoCoder is custom (not a `transformers` class), consumers reconstruct 
 from huggingface_hub import snapshot_download
 from nanocoder import NanoCoder
 
-nano = NanoCoder.from_pretrained(snapshot_download("<you>/NanoCoder-110M"), device="cuda")
+nano = NanoCoder.from_pretrained(snapshot_download("<you>/NanoCoder-123M-pretrain"), device="cuda")
 print(nano.generate_text("## Task\nWrite a function that reverses a string.\n\n## Solution\n"))
 ```
 
@@ -53,12 +53,32 @@ python -m nanocoder.tokenizer.build \
     --repo-id       <you>/NanoCoder-tokenizer
 ```
 
-**3 — Train the base model** → pushes `NanoCoder-110M`
+**3 — Train the base model** → pushes `NanoCoder-123M-pretrain`
 
 ```bash
 python -m nanocoder.model.train \
     --tokenizer-repo <you>/NanoCoder-tokenizer \
-    --repo-id        <you>/NanoCoder-110M
+    --repo-id        <you>/NanoCoder-123M-pretrain
+```
+
+**4 — Build the SFT dataset** → pushes `NanoCoder-sft`
+
+Instruction pairs only, with every response stripped to its fenced Python block. Held out
+against MBPP and HumanEval so the eval stays honest.
+
+```bash
+python -m nanocoder.data.build_sft --repo-id <you>/NanoCoder-sft
+# smoke test first:  --per-source 2000 --no-push
 ```
 
 Every entrypoint takes `--help`, `--no-push` (build/verify without uploading), and `--private`.
+
+## Evaluation
+
+Correctness is measured by execution, not by loss. The harness samples $n$ completions per task, runs each against the benchmark's own tests in an isolated subprocess, and reports *pass@k* alongside a parse rate and a failure histogram - parse rate separately because at this scale form is learned well before function.
+
+```bash
+python -m nanocoder.eval.harness \
+    --model <you>/NanoCoder-123M-pretrain \
+    --benchmark mbpp --n-samples 5 --out results/base_mbpp.jsonl
+```
