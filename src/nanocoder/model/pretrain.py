@@ -27,8 +27,30 @@ from nanocoder.training.loop import train_loop
 from nanocoder.training.schedule import WarmupCosineAnnealing
 
 
+# -- Lazy view of one split's text column. compile_corpus only iterates, and datasets keeps
+#    the Arrow table memory-mapped, so this never materialises the corpus in RAM. __len__ is
+#    what keeps the tqdm total.
+class _TextColumn:
+    def __init__(self, split):
+        self._split = split
+
+    def __len__(self):
+        return len(self._split)
+
+    def __iter__(self):
+        for row in self._split:
+            yield row["text"]
+
+
+# -- Trains on the documents build_pretrain pushed, not a fresh stream of the seven sources.
+def _load_corpus_texts(pretrain_repo: str):
+    from datasets import load_dataset
+    ds = load_dataset(pretrain_repo)
+    return _TextColumn(ds["train"]), _TextColumn(ds["validation"])
+
+
+# -- AdamW, decay on >=2D params only; fused kernel on CUDA.
 def build_optimizer(model, tcfg, device):
-    """AdamW with decay only on >=2D params; fused kernel on CUDA."""
     decay = [p for p in model.parameters() if p.requires_grad and p.dim() >= 2]
     no_decay = [p for p in model.parameters() if p.requires_grad and p.dim() < 2]
     groups = [
@@ -42,7 +64,10 @@ def build_optimizer(model, tcfg, device):
 def main():
     ap = argparse.ArgumentParser(description="Train & push the NanoCoder base model.")
     ap.add_argument("--tokenizer-repo", default="torq1/NanoCoder-tokenizer")
-    ap.add_argument("--pretrain-repo", default="torq1/NanoCoder-pretrain")  # reserved for a Dataset-backed loader
+    ap.add_argument("--pretrain-repo", default="torq1/NanoCoder-pretrain",
+                    help="Hub dataset to train on (pushed by build_pretrain).")
+    ap.add_argument("--rebuild-corpus", action="store_true",
+                    help="Re-stream the seven sources instead of loading --pretrain-repo.")
     ap.add_argument("--repo-id", default="torq1/NanoCoder-123M-pretrain")
     ap.add_argument("--save-dir", default="./nano-coder-export")
     ap.add_argument("--device", default=None, help="Override device (default: auto).")
@@ -63,7 +88,11 @@ def main():
     # --- corpus: stream + compile (token-level FIM happens here)
     dcfg = DatasetConfig()
     tcfg = TrainConfig()
-    train_texts, val_texts = build_dataset(dcfg)
+    if args.rebuild_corpus:
+        train_texts, val_texts = build_dataset(dcfg)
+    else:
+        train_texts, val_texts = _load_corpus_texts(args.pretrain_repo)
+    print(f"Corpus: {len(train_texts):,} train / {len(val_texts):,} val docs")
     train_ids, ttoks_train = compile_corpus(tokenizer, train_texts, tcfg.fim_rate, add_eos=True)
     val_ids, ttoks_val = compile_corpus(tokenizer, val_texts, fim_rate=0.0, add_eos=True)
     print(f"Train tokens: {ttoks_train:,} | Val tokens: {ttoks_val:,}")

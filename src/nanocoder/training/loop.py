@@ -9,6 +9,9 @@ from nanocoder.data.corpus import get_batch
 
 
 def update_plots(c_it, train_log, val_log, lr_log, gn_log, plot_handle, max_iters, base_lr):
+    # bail before importing matplotlib it when there is no handle to draw into.
+    if plot_handle is None:
+        return
     import matplotlib.pyplot as plt
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
     plots = axes.flatten()

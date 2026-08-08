@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Notebook scratch
+.ipynb_checkpoints/
+
+# Local run output (checkpoints, tokenizer artifacts, eval)
+nano-coder-export/
+nano-coder-sft-export/
+nano-coder-rft-export/
+nano-coder-dpo-export/
+nano-coder-tokenizer/
+results/
