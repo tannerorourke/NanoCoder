@@ -22,8 +22,9 @@ from nanocoder.data.sources import build_dataset
 from nanocoder.model.gpt import GPT
 from nanocoder.model.nanocoder import NanoCoder
 from nanocoder.tokenizer.tokenizer import NanoCoderTokenizer
+from nanocoder.training.checkpoint import load_checkpoint, resolve_resume
 from nanocoder.training.config import NanoCoderConfig, TrainConfig
-from nanocoder.training.loop import train_loop
+from nanocoder.training.loop import CKPT_PREFIX, train_loop
 from nanocoder.training.schedule import WarmupCosineAnnealing
 
 
@@ -73,6 +74,14 @@ def main():
     ap.add_argument("--device", default=None, help="Override device (default: auto).")
     ap.add_argument("--private", action="store_true")
     ap.add_argument("--no-push", action="store_true")
+    ap.add_argument("--checkpoint-dir", default="./checkpoints")
+    ap.add_argument("--resume", default=None,
+                    help="Checkpoint path, or 'auto' for the newest in --checkpoint-dir. "
+                         "'auto' on an empty directory starts from scratch.")
+    ap.add_argument("--batch-size", type=int, default=None)
+    ap.add_argument("--grad-accum-steps", type=int, default=None,
+                    help="Pair with --batch-size to hold tokens/step fixed while trading "
+                         "micro-batch size against accumulation depth.")
     args = ap.parse_args()
 
     seed_global()
@@ -88,6 +97,10 @@ def main():
     # --- corpus: stream + compile (token-level FIM happens here)
     dcfg = DatasetConfig()
     tcfg = TrainConfig()
+    if args.batch_size:
+        tcfg.batch_size = args.batch_size
+    if args.grad_accum_steps:
+        tcfg.grad_accum_steps = args.grad_accum_steps
     if args.rebuild_corpus:
         train_texts, val_texts = build_dataset(dcfg)
     else:
@@ -102,7 +115,10 @@ def main():
     model = GPT(mcfg).to(device)
     nanocoder = NanoCoder(model, mcfg, tokenizer, device=device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Model: {n_params / 1e6:.1f}M params on {device}")
+    # -- tokens/step is the quantity that must stay fixed when batch and accumulation are
+    #    retuned for throughput; printing it makes an accidental change to it visible
+    print(f"Model: {n_params / 1e6:.1f}M params on {device} | "
+          f"{tcfg.batch_size * mcfg.block_size * tcfg.grad_accum_steps:,} tokens/step")
 
     # --- optimizer / schedule / amp
     optimizer = build_optimizer(model, tcfg, device)
@@ -113,6 +129,14 @@ def main():
     autocast_ctx = (torch.autocast(device_type="cuda", dtype=tcfg.dtype)
                     if is_cuda else nullcontext())
 
+    # -- restore after the optimizer exists, so its state loads onto the live parameters
+    start_iter = 0
+    resume_path = resolve_resume(args.resume, args.checkpoint_dir, CKPT_PREFIX)
+    if resume_path:
+        start_iter, _ = load_checkpoint(resume_path, model, optimizer, scaler)
+        scheduler.set_iter(start_iter)
+        print(f"Resumed {resume_path} at iter {start_iter}/{tcfg.max_iters}")
+
     # --- train
     train_loop(
         model, optimizer, scheduler,
@@ -120,6 +144,7 @@ def main():
         mcfg.block_size, tcfg.batch_size,
         tcfg=tcfg, device=device, autocast_ctx=autocast_ctx,
         scaler=scaler, plot_handle=None,
+        start_iter=start_iter, checkpoint_dir=args.checkpoint_dir,
     )
 
     # --- export

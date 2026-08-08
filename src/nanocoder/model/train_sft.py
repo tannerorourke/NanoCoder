@@ -20,12 +20,13 @@ import torch
 from nanocoder.constants import resolve_device, seed_global
 from nanocoder.data.sft import decode_masked, encode_example, build_labels
 from nanocoder.model.nanocoder import NanoCoder
+from nanocoder.training.checkpoint import load_checkpoint, resolve_resume
 from nanocoder.training.config import SFTConfig
 from nanocoder.training.sft_loop import sft_loop
 
 
+# -- AdamW, decay on >=2D params only; fused kernel on CUDA
 def build_optimizer(model, cfg, device):
-    """AdamW with decay only on >=2D params; fused kernel on CUDA. Mirrors train.py """
     decay = [p for p in model.parameters() if p.requires_grad and p.dim() >= 2]
     no_decay = [p for p in model.parameters() if p.requires_grad and p.dim() < 2]
     groups = [
@@ -51,12 +52,9 @@ def encode_split(tokenizer, rows, block_size: int, desc: str):
     return kept
 
 
+# -- Fraction of trained tokens carrying gradient. A low figure means block_size and the
+#    corpus length filter are mismatched and the compute is going into <|eos|> filler.
 def supervision_report(examples, cfg):
-    """
-    Fraction of trained tokens which carry gradient. Helps determine whether block_size and
-    the corpus length filter are matched to each other. low figure means most of the compute
-    is being spent on <|eos|> filler.
-    """
     total = sup = 0
     for ex in examples[:2000]:
         total += cfg.block_size
@@ -78,6 +76,9 @@ def main():
     ap.add_argument("--device", default=None)
     ap.add_argument("--private", action="store_true")
     ap.add_argument("--no-push", action="store_true")
+    ap.add_argument("--checkpoint-dir", default="./checkpoints")
+    ap.add_argument("--resume", default=None,
+                    help="Checkpoint path, or 'auto' for the newest in --checkpoint-dir.")
     args = ap.parse_args()
 
     seed_global()
@@ -127,8 +128,15 @@ def main():
     autocast_ctx = (torch.autocast(device_type="cuda", dtype=cfg.dtype)
                     if is_cuda else nullcontext())
 
+    start_step = 0
+    resume_path = resolve_resume(args.resume, args.checkpoint_dir, "sft")
+    if resume_path:
+        start_step, _ = load_checkpoint(resume_path, nano.model, optimizer, scaler)
+        print(f"Resumed {resume_path} at step {start_step}")
+
     sft_loop(nano.model, optimizer, train_ex, val_ex, cfg, eos_id,
-             device=device, autocast_ctx=autocast_ctx, scaler=scaler)
+             device=device, autocast_ctx=autocast_ctx, scaler=scaler,
+             checkpoint_dir=args.checkpoint_dir, start_step=start_step, ckpt_prefix="sft")
 
     # --- export
     nano.save_pretrained(args.save_dir)

@@ -6,6 +6,14 @@ import time
 import torch
 
 from nanocoder.data.corpus import get_batch
+from nanocoder.training.checkpoint import rotate_checkpoints, save_checkpoint
+
+CKPT_PREFIX = "nanocoder"
+
+
+def _fmt_eta(seconds: float) -> str:
+    s = int(max(0.0, seconds))
+    return f"{s // 3600}:{(s % 3600) // 60:02d}:{s % 60:02d}"
 
 
 def update_plots(c_it, train_log, val_log, lr_log, gn_log, plot_handle, max_iters, base_lr):
@@ -63,7 +71,15 @@ def train_loop(
     autocast_ctx,
     scaler=None,
     plot_handle=None,
+    start_iter: int = 0,
+    checkpoint_dir: str = "./checkpoints",
 ):
+    """
+    Run to tcfg.max_iters, resuming from start_iter when given.
+
+    get_batch draws random offsets, so there is no sampler position to restore; a resume is
+    fully described by the model, optimizer and scheduler state.
+    """
     use_scaler = scaler is not None and getattr(scaler, "is_enabled", lambda: False)()
 
     @torch.no_grad()
@@ -88,15 +104,18 @@ def train_loop(
     train_log, val_log, lr_log, gn_log = [], [], [], []
 
     X, Y = get_batch(data_tr, block_size, batch_size, device)  # prefetch first batch
+    ema_dt = None
     t_iter = time.time()
-    for it in range(1, tcfg.max_iters + 1):
-        total_loss = 0.0
+    for it in range(start_iter + 1, tcfg.max_iters + 1):
+        # -- accumulated on-device. Calling .item() per micro-step would sync the GPU
+        #    grad_accum_steps times an iteration purely to build a log line.
+        total_loss = torch.zeros((), device=device)
 
-        # --- accum grads
         for micro_step in range(tcfg.grad_accum_steps):
             with autocast_ctx:
                 _, loss = forward(X, Y)
                 loss = loss / tcfg.grad_accum_steps
+            total_loss += loss.detach()
 
             X, Y = get_batch(data_tr, block_size, batch_size, device)  # async prefetch
             if use_scaler:
@@ -107,7 +126,8 @@ def train_loop(
         if use_scaler:
             scaler.unscale_(optimizer)
         gn = torch.nn.utils.clip_grad_norm_(model.parameters(), tcfg.grad_clip)
-        gn_log.append((it, gn.item()))
+        gn_val = gn.item()
+        gn_log.append((it, gn_val))
         if use_scaler:
             scaler.step(optimizer)
             scaler.update()
@@ -117,42 +137,45 @@ def train_loop(
         optimizer.zero_grad(set_to_none=True)
         scheduler.step()
 
-        # --- logging
+        # -- the iteration after a start or resume pays for torch.compile, so it stays out
+        #    of the average the ETA reads from
         dt = time.time() - t_iter
-        it_per_sec = 1 / dt if dt > 0 else 0
-        print(f"\riter {it:<5}/{tcfg.max_iters} -- "
-              f"{100 * it / tcfg.max_iters:.2f}% ({it_per_sec:5.2f}it/s)",
-              end='', flush=True)
         t_iter = time.time()
+        if it > start_iter + 1:
+            ema_dt = dt if ema_dt is None else 0.9 * ema_dt + 0.1 * dt
 
+        tl = total_loss.item()          # -- one sync per iteration
         lr = scheduler.last_lr
-        summ = f"\riter {it:<5} | Tl: {loss.item() * tcfg.grad_accum_steps:.4f}"
         is_log_it = it % tcfg.log_interval == 0
         is_val_it = it % tcfg.eval_interval == 0
-        if is_log_it or it == tcfg.max_iters:
-            train_log.append((it, loss.item() * tcfg.grad_accum_steps))
+        is_ckpt_it = it % tcfg.checkpoint_interval == 0
+        is_last = it == tcfg.max_iters
+
+        summ = f"\riter {it:<5}/{tcfg.max_iters} | Tl: {tl:.4f}"
+        if is_log_it or is_last:
+            train_log.append((it, tl))
             lr_log.append((it, lr))
             update_plots(it, train_log, val_log, lr_log, gn_log, plot_handle,
                          tcfg.max_iters, tcfg.base_lr)
 
-        if is_val_it or it == tcfg.max_iters:
+        if is_val_it or is_last:
             losses = estimate_loss()
             val_log.append((it, losses['val']))
             summ += f" | Vl: {losses['val']:.4f}"
 
-        summ += f" | lr:{lr:.4f} | gn:{gn:.4f}"
-        if is_log_it or is_val_it or it == tcfg.max_iters:
-            print(f'\r{summ}', flush=True)
-        else:
-            print(f'\r{summ}', end='', flush=True)
+        summ += f" | lr:{lr:.2e} | gn:{gn_val:.3f}"
+        if ema_dt:
+            summ += f" | {ema_dt:.2f}s/it | ETA {_fmt_eta((tcfg.max_iters - it) * ema_dt)}"
+        # -- sole writer of this line. A second print would overwrite it within the same
+        #    iteration, which is what kept the old rate counter off screen.
+        print(summ, end='\n' if (is_log_it or is_val_it or is_ckpt_it or is_last) else '',
+              flush=True)
 
-        if it % 2_000 == 0:
-            os.makedirs('./checkpoints', exist_ok=True)
-            torch.save({
-                'model':     model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-            }, f'checkpoints/nanocoder_{it}.pt')
-            print(f"Saved checkpoint at iter {it}")
+        if is_ckpt_it or is_last:
+            path = save_checkpoint(os.path.join(checkpoint_dir, f"{CKPT_PREFIX}_{it}.pt"),
+                                   model, optimizer, step=it, scaler=scaler)
+            rotate_checkpoints(checkpoint_dir, CKPT_PREFIX, tcfg.keep_checkpoints)
+            print(f"Saved {path}", flush=True)
 
     model.eval()
     return model, train_log, val_log, lr_log, gn_log

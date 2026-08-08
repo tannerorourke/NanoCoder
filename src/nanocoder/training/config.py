@@ -12,13 +12,9 @@ from dataclasses import dataclass
 import torch
 
 
+# -- Widest autocast dtype the GPU supports. Ampere and later (A100, L4) do bf16;
+#    Volta and Turing (V100, T4) do fp16 but not bf16, and need the GradScaler path.
 def resolve_dtype() -> torch.dtype:
-    """
-    Pick widest autocast dtype GPU supports.
-    - Ampere and later (A100, L4 - the paid Colab cards) do bf16
-    - Volta (V100), Turing (T4) Turing (free Colab cards) do fp16 but not bf16
-    - Otherwise float32 for precision on CPU
-    """
     if not torch.cuda.is_available():
         return torch.float32
     if torch.cuda.is_bf16_supported():
@@ -52,6 +48,10 @@ class TrainConfig:
     log_interval: int       = 25
     eval_interval: int      = 500
     eval_iters: int         = 20
+    # --- checkpointing
+    # A checkpoint is ~12 bytes/param (fp32 weights + Adam's two moments), so ~1.5GB here.
+    checkpoint_interval: int = 250
+    keep_checkpoints: int    = 2
     # --- optimizers
     max_iters: int          = 6000
     warmup_iters: int       = 300
@@ -61,12 +61,9 @@ class TrainConfig:
     weight_decay: float     = 0.1
     betas: tuple[float, float] = (0.9, 0.95)
     grad_clip: float        = 1.0
-    # --- tokenizer aug
-    # 0.15 still teaches infill but stops FIM from dominating the objective.
-    # Any higher and FIM becomes a dominant % of training tokens that sit inside a 
-    # FIM-reordered block whose sentinels never appear at inference (we always prompt 
-    # left-to-right). That both wastes capacity and teaches the model to emit <|fim_*|> 
-    # as ordinary code tokens.
+    # -- Enough to teach infill without dominating the objective. Inference always prompts
+    #    left-to-right, so a reordered block's sentinels never appear there; raising this
+    #    wastes capacity and teaches the model to emit <|fim_*|> as ordinary code.
     fim_rate: float         = 0.15
 
 
@@ -84,6 +81,8 @@ class SFTConfig:
     log_interval: int       = 25
     eval_interval: int      = 250
     eval_batches: int       = 20
+    checkpoint_interval: int = 250
+    keep_checkpoints: int    = 2
     # --- optimizer
     base_lr: float          = 6e-5      # ~10% of the pretrain base
     warmup_steps: int       = 100
@@ -105,6 +104,7 @@ class RFTConfig(SFTConfig):
     epochs: int             = 1
     base_lr: float          = 2e-5
     warmup_steps: int       = 40
+    checkpoint_interval: int = 100      # one short epoch; 250 could never fire
 
 
 @dataclass
@@ -127,6 +127,8 @@ class DPOConfig:
     log_interval: int       = 10
     eval_interval: int      = 100
     eval_batches: int       = 20
+    checkpoint_interval: int = 100      # short run; matched to eval_interval
+    keep_checkpoints: int    = 2
     base_lr: float          = 5e-7
     warmup_steps: int       = 20
     weight_decay: float     = 0.0       # the KL term to the reference is the regulariser

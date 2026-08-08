@@ -23,6 +23,7 @@ from nanocoder.constants import resolve_device, seed_global
 from nanocoder.data.preference import load_pairs
 from nanocoder.model.nanocoder import NanoCoder
 from nanocoder.model.train_sft import build_optimizer
+from nanocoder.training.checkpoint import load_checkpoint, resolve_resume
 from nanocoder.training.config import DPOConfig
 from nanocoder.training.dpo import dpo_loop, freeze_reference
 
@@ -42,6 +43,9 @@ def main():
     ap.add_argument("--device", default=None)
     ap.add_argument("--private", action="store_true")
     ap.add_argument("--no-push", action="store_true")
+    ap.add_argument("--checkpoint-dir", default="./checkpoints")
+    ap.add_argument("--resume", default=None,
+                    help="Checkpoint path, or 'auto' for the newest in --checkpoint-dir.")
     args = ap.parse_args()
 
     seed_global()
@@ -78,8 +82,18 @@ def main():
     autocast_ctx = (torch.autocast(device_type="cuda", dtype=cfg.dtype)
                     if is_cuda else nullcontext())
 
+    # -- must stay below freeze_reference: the anchor is the base policy, and restoring
+    #    first would make the reference a copy of the partly-tuned one, quietly weakening
+    #    the KL term that DPO relies on
+    start_step = 0
+    resume_path = resolve_resume(args.resume, args.checkpoint_dir, "dpo")
+    if resume_path:
+        start_step, _ = load_checkpoint(resume_path, nano.model, optimizer, scaler)
+        print(f"Resumed {resume_path} at step {start_step}")
+
     dpo_loop(nano.model, ref, optimizer, train_pairs, val_pairs, cfg, eos_id,
-             device=device, autocast_ctx=autocast_ctx, scaler=scaler)
+             device=device, autocast_ctx=autocast_ctx, scaler=scaler,
+             checkpoint_dir=args.checkpoint_dir, start_step=start_step, ckpt_prefix="dpo")
 
     nano.save_pretrained(args.save_dir)
     print(f"Saved model to {args.save_dir}")

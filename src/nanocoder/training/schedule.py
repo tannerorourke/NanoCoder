@@ -15,8 +15,13 @@ class WarmupCosineAnnealing:
         self.min_lr = min_lr
         self.lr_decay_iters = max(warmup_iters, lr_decay_iters)
 
-        self.last_lr = self.base_lr
-        self._it = 0
+        self.set_iter(0)
+
+    # -- place the schedule at 'it' completed iterations; a resume calls this before training
+    def set_iter(self, it: int) -> None:
+        self._it = it
+        self.last_lr = self._get_lr(it)
+        self._apply(self.last_lr)
 
     def _get_lr(self, it: int) -> float:
         if it < self.warmup_iters:
@@ -31,11 +36,11 @@ class WarmupCosineAnnealing:
         for group in self.optimizer.param_groups:
             group["lr"] = lr
 
+    # -- last_lr is the rate the finished iteration ran at; the applied one is for the next.
     def step(self):
         self.last_lr = self.optimizer.param_groups[0]["lr"]
-        lr = self._get_lr(self._it)
-        self._apply(lr)
         self._it += 1
+        self._apply(self._get_lr(self._it))
 
 """
 Linear warmup -> hold. Used in SFT and RFT.

@@ -1,16 +1,22 @@
 """
-Epoch-based fine-tuning loop. Used by both SFT and RFT
+Epoch-based fine-tuning loop. Used by both SFT and RFT.
 
-Unlike train_loop (pretraining, random offsets from infinite token 
-stream), walk a finite list of examples fixed num of times and
+Unlike train_loop (pretraining, random offsets from an effectively infinite token stream),
+this walks a finite list of examples a fixed number of times. That makes an epoch's batch
+order part of the run state, so each epoch draws from its own seeded RNG rather than the
+shared one: the order then depends only on the epoch index, and a resume can rebuild it and
+skip forward to the exact step it stopped at.
 """
 import os
+import random
 import time
 from contextlib import nullcontext
 
 import torch
 
+from nanocoder.constants import SEED
 from nanocoder.data.sft import sft_batches
+from nanocoder.training.checkpoint import rotate_checkpoints, save_checkpoint
 from nanocoder.training.schedule import constant_with_warmup
 
 
@@ -39,6 +45,8 @@ def sft_loop(
     autocast_ctx,
     scaler=None,
     checkpoint_dir: str | None = None,
+    start_step: int = 0,
+    ckpt_prefix: str = "sft",
 ):
     """
     Run cfg.epochs passes over train_examples.
@@ -54,16 +62,23 @@ def sft_loop(
     model.train()
 
     train_log, val_log, lr_log, gn_log = [], [], [], []
-    step = 0
+    # -- drop_last makes this exact, so a resume can locate its epoch without materialising one
+    steps_per_epoch = max(1, (len(train_examples) // cfg.batch_size) // cfg.grad_accum_steps)
+    start_epoch = start_step // steps_per_epoch
+    step = start_step
+    lr_apply(step)      # -- construction applied the warmup rate; a resume is past it
     t0 = time.time()
 
-    for epoch in range(cfg.epochs):
+    for epoch in range(start_epoch, cfg.epochs):
         batches = list(sft_batches(train_examples, cfg.block_size, cfg.batch_size,
-                                   eos_id, device, shuffle=True))
+                                   eos_id, device, shuffle=True,
+                                   rng=random.Random(SEED + epoch)))
         n_steps = len(batches) // cfg.grad_accum_steps
-        print(f"\nEpoch {epoch + 1}/{cfg.epochs}: {len(batches)} batches -> {n_steps} steps")
+        first = step - epoch * steps_per_epoch      # -- 0 unless resuming mid-epoch
+        print(f"\nEpoch {epoch + 1}/{cfg.epochs}: {len(batches)} batches -> {n_steps} steps"
+              + (f", resuming at step {first}" if first else ""))
 
-        for s in range(n_steps):
+        for s in range(first, n_steps):
             total = 0.0
             for micro in range(cfg.grad_accum_steps):
                 x, y = batches[s * cfg.grad_accum_steps + micro]
@@ -103,11 +118,20 @@ def sft_loop(
                 val_log.append((step, vl))
                 print(f"\rstep {step:<5} | Vl: {vl:.4f}", flush=True)
 
-        if checkpoint_dir:
-            os.makedirs(checkpoint_dir, exist_ok=True)
-            path = os.path.join(checkpoint_dir, f"sft_epoch{epoch + 1}.pt")
-            torch.save({"model": model.state_dict(), "epoch": epoch + 1}, path)
-            print(f"Saved {path}")
+            if checkpoint_dir and step % cfg.checkpoint_interval == 0:
+                path = save_checkpoint(
+                    os.path.join(checkpoint_dir, f"{ckpt_prefix}_{step}.pt"),
+                    model, optimizer, step=step, scaler=scaler, extra={"epoch": epoch + 1})
+                rotate_checkpoints(checkpoint_dir, ckpt_prefix, cfg.keep_checkpoints)
+                print(f"\rSaved {path}", flush=True)
+
+    # -- the interval save already covers a final step that lands on it
+    if checkpoint_dir and step % cfg.checkpoint_interval != 0:
+        path = save_checkpoint(os.path.join(checkpoint_dir, f"{ckpt_prefix}_{step}.pt"),
+                               model, optimizer, step=step, scaler=scaler,
+                               extra={"epoch": cfg.epochs})
+        rotate_checkpoints(checkpoint_dir, ckpt_prefix, cfg.keep_checkpoints)
+        print(f"Saved {path}")
 
     if val_examples:
         vl = estimate_loss(model, val_examples, cfg, eos_id, device,

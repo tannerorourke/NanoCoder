@@ -22,14 +22,18 @@ Two things easy to get (quietly) wrongg:
   *both* log-probs down and merely separating them, which is degenerate --> log both of the 
   implicit rewards, their margin, and chosen/rejected accuracy are all logged.
 """
+import os
+import random
 import time
 from contextlib import nullcontext
 
 import torch
 import torch.nn.functional as F
 
+from nanocoder.constants import SEED
 from nanocoder.data.preference import pair_batches
 from nanocoder.data.sft import IGNORE
+from nanocoder.training.checkpoint import rotate_checkpoints, save_checkpoint
 from nanocoder.training.sft_loop import constant_with_warmup
 
 
@@ -93,7 +97,8 @@ def evaluate_pairs(policy, ref, pairs, cfg, eos_id, device, autocast_ctx, max_ba
 
 
 def dpo_loop(policy, ref, optimizer, train_pairs, val_pairs, cfg, eos_id,
-             device, autocast_ctx, scaler=None):
+             device, autocast_ctx, scaler=None, checkpoint_dir=None,
+             start_step: int = 0, ckpt_prefix: str = "dpo"):
     """
     One pass of preference tuning.
     - Margin rising while accuracy stays flat is the signature of the policy exploiting a 
@@ -106,14 +111,22 @@ def dpo_loop(policy, ref, optimizer, train_pairs, val_pairs, cfg, eos_id,
     lr_apply = constant_with_warmup(optimizer, cfg.base_lr, cfg.warmup_steps)
     policy.train()
 
-    log, step, t0 = [], 0, time.time()
-    for epoch in range(cfg.epochs):
-        batches = list(pair_batches(train_pairs, cfg.block_size, cfg.batch_size,
-                                    eos_id, device, shuffle=True))
-        n_steps = len(batches) // cfg.grad_accum_steps
-        print(f"\nEpoch {epoch + 1}/{cfg.epochs}: {len(batches)} batches -> {n_steps} steps")
+    steps_per_epoch = max(1, (len(train_pairs) // cfg.batch_size) // cfg.grad_accum_steps)
+    start_epoch = start_step // steps_per_epoch
+    log, step, t0 = [], start_step, time.time()
+    lr_apply(step)      # -- construction applied the warmup rate; a resume is past it
 
-        for s in range(n_steps):
+    for epoch in range(start_epoch, cfg.epochs):
+        # -- seeded per epoch so a resume rebuilds this order and skips into it
+        batches = list(pair_batches(train_pairs, cfg.block_size, cfg.batch_size,
+                                    eos_id, device, shuffle=True,
+                                    rng=random.Random(SEED + epoch)))
+        n_steps = len(batches) // cfg.grad_accum_steps
+        first = step - epoch * steps_per_epoch
+        print(f"\nEpoch {epoch + 1}/{cfg.epochs}: {len(batches)} batches -> {n_steps} steps"
+              + (f", resuming at step {first}" if first else ""))
+
+        for s in range(first, n_steps):
             totals = {"loss": 0.0, "margin": 0.0, "accuracy": 0.0,
                       "reward_chosen": 0.0, "reward_rejected": 0.0}
             for micro in range(cfg.grad_accum_steps):
@@ -156,6 +169,22 @@ def dpo_loop(policy, ref, optimizer, train_pairs, val_pairs, cfg, eos_id,
                                    autocast_ctx, cfg.eval_batches)
                 print(f"\rstep {step:<4} | VAL loss {v['loss']:.4f} | "
                       f"margin {v['margin']:+.3f} | acc {v['accuracy']:.3f}", flush=True)
+
+            # -- only the policy is saved; the reference is rebuilt from the base checkpoint
+            if checkpoint_dir and step % cfg.checkpoint_interval == 0:
+                path = save_checkpoint(
+                    os.path.join(checkpoint_dir, f"{ckpt_prefix}_{step}.pt"),
+                    policy, optimizer, step=step, scaler=scaler, extra={"epoch": epoch + 1})
+                rotate_checkpoints(checkpoint_dir, ckpt_prefix, cfg.keep_checkpoints)
+                print(f"\rSaved {path}", flush=True)
+
+    # -- the interval save already covers a final step that lands on it
+    if checkpoint_dir and step % cfg.checkpoint_interval != 0:
+        path = save_checkpoint(os.path.join(checkpoint_dir, f"{ckpt_prefix}_{step}.pt"),
+                               policy, optimizer, step=step, scaler=scaler,
+                               extra={"epoch": cfg.epochs})
+        rotate_checkpoints(checkpoint_dir, ckpt_prefix, cfg.keep_checkpoints)
+        print(f"Saved {path}")
 
     if val_pairs:
         v = evaluate_pairs(policy, ref, val_pairs, cfg, eos_id, device,
