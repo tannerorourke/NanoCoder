@@ -28,6 +28,21 @@ nano = NanoCoder.from_pretrained(snapshot_download("<you>/NanoCoder-123M-pretrai
 print(nano.generate_text("## Task\nWrite a function that reverses a string.\n\n## Solution\n"))
 ```
 
+## Install
+
+Python >=3.10, install into a virtual environment:
+
+```bash
+uv venv && source .venv/bin/activate && uv pip install -e .
+python3 -m venv .venv && source .venv/bin/activate && pip install -e .
+```
+
+From a Colab notebook, install straight from git:
+
+```bash
+pip install git+https://github.com/tannerorourke/NanoCoder
+```
+
 ## Usage
 
 This repository defines a reusable package (`src/nanocoder`) that is walked through in pieces in the `src/notebooks` modules.
@@ -60,6 +75,11 @@ python -m nanocoder.model.pretrain \
     --tokenizer-repo <you>/NanoCoder-tokenizer \
     --repo-id        <you>/NanoCoder-123M-pretrain
 ```
+
+The first run spends about an hour tokenizing the corpus before iteration 1. It is cached to
+`--corpus-cache-dir` (default `./corpus-cache`, ~4GB) and reloaded on later runs, so `--resume auto`
+restarts in seconds. The key covers the tokenizer, document count, FIM rate and split; anything that
+would change a token id gives a miss rather than a stale hit.
 
 **4 — Build the SFT dataset** → pushes `NanoCoder-sft`
 

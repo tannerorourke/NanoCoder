@@ -17,7 +17,7 @@ import torch
 
 from nanocoder.constants import resolve_device, seed_global
 from nanocoder.data.config import DatasetConfig
-from nanocoder.data.corpus import compile_corpus
+from nanocoder.data.corpus import compile_corpus, corpus_fingerprint
 from nanocoder.data.sources import build_dataset
 from nanocoder.model.gpt import GPT
 from nanocoder.model.nanocoder import NanoCoder
@@ -78,6 +78,8 @@ def main():
     ap.add_argument("--resume", default=None,
                     help="Checkpoint path, or 'auto' for the newest in --checkpoint-dir. "
                          "'auto' on an empty directory starts from scratch.")
+    ap.add_argument("--corpus-cache-dir", default="./corpus-cache",
+                    help="Where to keep the compiled token stream (~4GB). Pass '' to disable.")
     ap.add_argument("--batch-size", type=int, default=None)
     ap.add_argument("--grad-accum-steps", type=int, default=None,
                     help="Pair with --batch-size to hold tokens/step fixed while trading "
@@ -106,8 +108,21 @@ def main():
     else:
         train_texts, val_texts = _load_corpus_texts(args.pretrain_repo)
     print(f"Corpus: {len(train_texts):,} train / {len(val_texts):,} val docs")
-    train_ids, ttoks_train = compile_corpus(tokenizer, train_texts, tcfg.fim_rate, add_eos=True)
-    val_ids, ttoks_val = compile_corpus(tokenizer, val_texts, fim_rate=0.0, add_eos=True)
+
+    # -- Tokenizing takes multiple  hours and produces the same ids, so a restart 
+    #    should reload it rather than repeat it.
+    def cache_for(split: str, n_docs: int, fim_rate: float):
+        if not args.corpus_cache_dir:
+            return None
+        key = corpus_fingerprint(tokenizer, n_docs, split=split, fim_rate=fim_rate)
+        return os.path.join(args.corpus_cache_dir, f"{split}-{key}.npy")
+
+    train_ids, ttoks_train = compile_corpus(
+        tokenizer, train_texts, tcfg.fim_rate, add_eos=True,
+        cache_path=cache_for("train", len(train_texts), tcfg.fim_rate))
+    val_ids, ttoks_val = compile_corpus(
+        tokenizer, val_texts, fim_rate=0.0, add_eos=True,
+        cache_path=cache_for("val", len(val_texts), 0.0))
     print(f"Train tokens: {ttoks_train:,} | Val tokens: {ttoks_val:,}")
 
     # --- model

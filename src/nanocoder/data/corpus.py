@@ -1,10 +1,12 @@
+import hashlib
+import os
 from array import array
 
 import numpy as np
 import torch
 from tqdm.auto import tqdm
 
-from nanocoder.constants import RNG
+from nanocoder.constants import RNG, SEED
 
 
 def apply_token_fim(ids, fim_prefix_id, fim_middle_id, fim_suffix_id, spm_rate=0.5, rng=RNG):
@@ -28,18 +30,39 @@ def apply_token_fim(ids, fim_prefix_id, fim_middle_id, fim_suffix_id, spm_rate=0
     return [fim_prefix_id] + prefix + [fim_suffix_id] + suffix + [fim_middle_id] + middle
 
 
-def compile_corpus(tokenizer, texts, fim_rate, spm_rate=0.5, add_eos=True, rng=RNG):
+# -- Identity of a compiled stream. Everything that can change an id feeds the hash, so a
+#    retrained tokenizer or a different FIM rate names a new file rather than silently
+#    reusing ids that no longer match the model being trained.
+def corpus_fingerprint(tokenizer, n_docs: int, **params) -> str:
+    h = hashlib.sha256()
+    for tok, tid in sorted(tokenizer._engine.encoder.items()):
+        h.update(f"{tok}\x00{tid}\x01".encode("utf-8", "surrogatepass"))
+    h.update(repr((n_docs, SEED, sorted(params.items()))).encode())
+    return h.hexdigest()[:16]
+
+
+def _cache_store(path: str, ids: np.ndarray) -> None:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    # -- write-then-rename, so a job killed mid-write leaves no truncated cache behind
+    tmp = f"{path}.tmp.npy"
+    np.save(tmp, ids)
+    os.replace(tmp, path)
+
+
+def compile_corpus(tokenizer, texts, fim_rate, spm_rate=0.5, add_eos=True, rng=RNG,
+                   cache_path=None):
     """
-    array('H') is a flat C buffer of uint16: ~2 bytes/token. 
-    
-    CPython interns ints up to 256, our ids run to ~49k, so every token is 
-    a heap-allocated object plus a pointer. At ~2B tokens = ~4GB vs ~70GB.
-    
-    A Python list of ids
-    costs ~36 bytes/token, because CPython only interns ints up to 256 and our ids
-    run to ~49k - so every token is a heap-allocated object plus a pointer. At ~2B
-    tokens that's 4GB vs ~70GB.
+    Tokenize all documents into one flat uint16 buffer (~2 bytes/token). A Python list
+    costs ~36 bytes/token: CPython interns ints only to 256 and ids run to ~49k, so each
+    is a heap object plus a pointer. At ~2B tokens, 4GB vs ~70GB.
+
+    cache_path, when set, reuses a previous compile instead of repeating the pass.
     """
+    if cache_path and os.path.exists(cache_path):
+        ids = np.load(cache_path)
+        print(f"Corpus cache hit: {cache_path} ({len(ids):,} tokens)")
+        return ids, len(ids)
+
     buf = array('H')
     n_tokens = 0
     enc = tokenizer._engine.encoder
@@ -54,7 +77,11 @@ def compile_corpus(tokenizer, texts, fim_rate, spm_rate=0.5, add_eos=True, rng=R
         n_tokens += len(ids)
         buf.extend(ids)
     # zero-copy view over the buffer; 'buf' stays alive as the array's .base
-    return np.frombuffer(buf, dtype=np.uint16), n_tokens
+    ids = np.frombuffer(buf, dtype=np.uint16)
+    if cache_path:
+        _cache_store(cache_path, ids)
+        print(f"Corpus cached to {cache_path} ({ids.nbytes / 1e9:.1f} GB)")
+    return ids, n_tokens
 
 
 def get_batch(ids: np.ndarray, block_size: int, batch_size: int, device: str):
